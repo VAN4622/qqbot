@@ -219,10 +219,12 @@ openclaw gateway
   "channels": {
     "qqbot": {
       "enabled": true,
-      "appId": "111111111",
-      "clientSecret": "secret-of-bot-1",
-
       "accounts": {
+        "default": {
+          "enabled": true,
+          "appId": "111111111",
+          "clientSecret": "secret-of-bot-1"
+        },
         "bot2": {
           "enabled": true,
           "appId": "222222222",
@@ -241,10 +243,10 @@ openclaw gateway
 
 **说明：**
 
-- 顶层的 `appId` / `clientSecret` 是**默认账户**（accountId = `"default"`）
+- `accounts.default` 是**默认账户**（accountId = `"default"`）
 - `accounts` 下的每个 key（如 `bot2`、`bot3`）就是该账户的 `accountId`
 - 每个账户都可以独立配置 `enabled`、`name`、`allowFrom` 等字段；`systemPrompt` 已弃用，请迁移到 OpenClaw 的 agent/system 配置侧
-- 默认账户仍需保留在顶层；不要写成 `accounts.default`
+- 旧版顶层 `appId` / `clientSecret` 仍可兼容读取，但推荐迁移到 `accounts.default`
 
 ### 多账户语音配置
 
@@ -273,8 +275,6 @@ openclaw gateway
   "channels": {
     "qqbot": {
       "enabled": true,
-      "appId": "111111111",
-      "clientSecret": "secret-of-bot-1",
       "stt": {
         "provider": "siliconflow",
         "model": "FunAudioLLM/SenseVoiceSmall"
@@ -285,6 +285,11 @@ openclaw gateway
         "voice": "alloy"
       },
       "accounts": {
+        "default": {
+          "enabled": true,
+          "appId": "111111111",
+          "clientSecret": "secret-of-bot-1"
+        },
         "bot2": {
           "enabled": true,
           "appId": "222222222",
@@ -301,7 +306,7 @@ openclaw gateway
 }
 ```
 
-- 上例中，`default` 账号使用顶层 `stt/tts`
+- 上例中，`default` 账号位于 `accounts.default`
 - `bot2` 继承顶层 `stt`，并覆盖自己的 `tts.voice`
 - 如果某个账号未配置 `stt/tts`，会自动回退到全局配置
 

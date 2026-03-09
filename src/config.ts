@@ -7,6 +7,57 @@ interface QQBotChannelConfig extends QQBotAccountConfig {
   accounts?: Record<string, QQBotAccountConfig>;
 }
 
+type QQBotAccountConfigKey = keyof QQBotAccountConfig;
+
+const LEGACY_DEFAULT_ACCOUNT_KEYS: QQBotAccountConfigKey[] = [
+  "name",
+  "appId",
+  "clientSecret",
+  "clientSecretFile",
+  "dmPolicy",
+  "allowFrom",
+  "systemPrompt",
+  "imageServerBaseUrl",
+  "markdownSupport",
+  "voiceDirectUploadFormats",
+  "audioFormatPolicy",
+];
+
+function getDefaultAccountBlock(cfg: OpenClawConfig): QQBotAccountConfig | undefined {
+  const qqbot = cfg.channels?.qqbot as QQBotChannelConfig | undefined;
+  return qqbot?.accounts?.[DEFAULT_ACCOUNT_ID];
+}
+
+function getLegacyTopLevelDefaultAccount(cfg: OpenClawConfig): QQBotAccountConfig {
+  const qqbot = cfg.channels?.qqbot as QQBotChannelConfig | undefined;
+  return {
+    enabled: qqbot?.enabled,
+    name: qqbot?.name,
+    appId: qqbot?.appId,
+    clientSecret: qqbot?.clientSecret,
+    clientSecretFile: qqbot?.clientSecretFile,
+    dmPolicy: qqbot?.dmPolicy,
+    allowFrom: qqbot?.allowFrom,
+    systemPrompt: qqbot?.systemPrompt,
+    imageServerBaseUrl: qqbot?.imageServerBaseUrl,
+    markdownSupport: qqbot?.markdownSupport ?? true,
+    voiceDirectUploadFormats: qqbot?.voiceDirectUploadFormats,
+    audioFormatPolicy: qqbot?.audioFormatPolicy,
+  };
+}
+
+function resolveDefaultAccountConfig(cfg: OpenClawConfig): QQBotAccountConfig {
+  const standardDefault = getDefaultAccountBlock(cfg);
+  const legacyDefault = getLegacyTopLevelDefaultAccount(cfg);
+  if (!standardDefault) {
+    return legacyDefault;
+  }
+  return {
+    ...legacyDefault,
+    ...standardDefault,
+  };
+}
+
 /**
  * 列出所有 QQBot 账户 ID
  */
@@ -14,7 +65,7 @@ export function listQQBotAccountIds(cfg: OpenClawConfig): string[] {
   const ids = new Set<string>();
   const qqbot = cfg.channels?.qqbot as QQBotChannelConfig | undefined;
 
-  if (qqbot?.appId) {
+  if (qqbot?.appId || qqbot?.accounts?.[DEFAULT_ACCOUNT_ID]?.appId) {
     ids.add(DEFAULT_ACCOUNT_ID);
   }
 
@@ -35,7 +86,7 @@ export function listQQBotAccountIds(cfg: OpenClawConfig): string[] {
 export function resolveDefaultQQBotAccountId(cfg: OpenClawConfig): string {
   const qqbot = cfg.channels?.qqbot as QQBotChannelConfig | undefined;
   // 如果有默认账户配置，返回 default
-  if (qqbot?.appId) {
+  if (qqbot?.appId || qqbot?.accounts?.[DEFAULT_ACCOUNT_ID]?.appId) {
     return DEFAULT_ACCOUNT_ID;
   }
   // 否则返回第一个配置的账户
@@ -65,20 +116,9 @@ export function resolveQQBotAccount(
   let secretSource: "config" | "file" | "env" | "none" = "none";
 
   if (resolvedAccountId === DEFAULT_ACCOUNT_ID) {
-    // 默认账户从顶层读取
-    accountConfig = {
-      enabled: qqbot?.enabled,
-      name: qqbot?.name,
-      appId: qqbot?.appId,
-      clientSecret: qqbot?.clientSecret,
-      clientSecretFile: qqbot?.clientSecretFile,
-      dmPolicy: qqbot?.dmPolicy,
-      allowFrom: qqbot?.allowFrom,
-      systemPrompt: qqbot?.systemPrompt,
-      imageServerBaseUrl: qqbot?.imageServerBaseUrl,
-      markdownSupport: qqbot?.markdownSupport ?? true,
-    };
-    appId = qqbot?.appId ?? "";
+    // 默认账户优先读取 accounts.default，回退到旧顶层结构
+    accountConfig = resolveDefaultAccountConfig(cfg);
+    appId = accountConfig.appId ?? "";
   } else {
     // 命名账户从 accounts 读取
     const account = qqbot?.accounts?.[resolvedAccountId];
@@ -126,42 +166,59 @@ export function applyQQBotAccountConfig(
   input: { appId?: string; clientSecret?: string; clientSecretFile?: string; name?: string; imageServerBaseUrl?: string }
 ): OpenClawConfig {
   const next = { ...cfg };
+  const currentQQBot = (next.channels?.qqbot as QQBotChannelConfig) || {};
 
   if (accountId === DEFAULT_ACCOUNT_ID) {
-    // 如果没有设置过 allowFrom，默认设置为 ["*"]
-    const existingConfig = (next.channels?.qqbot as QQBotChannelConfig) || {};
-    const allowFrom = existingConfig.allowFrom ?? ["*"];
-    
+    // 默认账户写入标准结构 accounts.default，并清理旧顶层字段
+    const legacyDefault = getLegacyTopLevelDefaultAccount(next);
+    const existingDefault = currentQQBot.accounts?.[DEFAULT_ACCOUNT_ID] || {};
+    const allowFrom = existingDefault.allowFrom ?? legacyDefault.allowFrom ?? ["*"];
+    const nextDefault: QQBotAccountConfig = {
+      ...legacyDefault,
+      ...existingDefault,
+      enabled: true,
+      allowFrom,
+      ...(input.appId ? { appId: input.appId } : {}),
+      ...(input.clientSecret
+        ? { clientSecret: input.clientSecret, clientSecretFile: undefined }
+        : input.clientSecretFile
+          ? { clientSecretFile: input.clientSecretFile, clientSecret: undefined }
+          : {}),
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.imageServerBaseUrl ? { imageServerBaseUrl: input.imageServerBaseUrl } : {}),
+    };
+
+    const sanitizedQQBot: Record<string, unknown> = {
+      ...(currentQQBot as Record<string, unknown>),
+      enabled: true,
+      accounts: {
+        ...(currentQQBot.accounts || {}),
+        [DEFAULT_ACCOUNT_ID]: nextDefault,
+      },
+    };
+
+    for (const key of LEGACY_DEFAULT_ACCOUNT_KEYS) {
+      delete sanitizedQQBot[key];
+    }
+
     next.channels = {
       ...next.channels,
-      qqbot: {
-        ...(next.channels?.qqbot as Record<string, unknown> || {}),
-        enabled: true,
-        allowFrom,
-        ...(input.appId ? { appId: input.appId } : {}),
-        ...(input.clientSecret
-          ? { clientSecret: input.clientSecret }
-          : input.clientSecretFile
-            ? { clientSecretFile: input.clientSecretFile }
-            : {}),
-        ...(input.name ? { name: input.name } : {}),
-        ...(input.imageServerBaseUrl ? { imageServerBaseUrl: input.imageServerBaseUrl } : {}),
-      },
+      qqbot: sanitizedQQBot as QQBotChannelConfig,
     };
   } else {
     // 如果没有设置过 allowFrom，默认设置为 ["*"]
-    const existingAccountConfig = (next.channels?.qqbot as QQBotChannelConfig)?.accounts?.[accountId] || {};
+    const existingAccountConfig = currentQQBot.accounts?.[accountId] || {};
     const allowFrom = existingAccountConfig.allowFrom ?? ["*"];
     
     next.channels = {
       ...next.channels,
       qqbot: {
-        ...(next.channels?.qqbot as Record<string, unknown> || {}),
+        ...(currentQQBot as Record<string, unknown> || {}),
         enabled: true,
         accounts: {
-          ...((next.channels?.qqbot as QQBotChannelConfig)?.accounts || {}),
+          ...(currentQQBot.accounts || {}),
           [accountId]: {
-            ...((next.channels?.qqbot as QQBotChannelConfig)?.accounts?.[accountId] || {}),
+            ...(currentQQBot.accounts?.[accountId] || {}),
             enabled: true,
             allowFrom,
             ...(input.appId ? { appId: input.appId } : {}),

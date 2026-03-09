@@ -315,12 +315,20 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
           cleared = true;
           changed = true;
         }
+        if (accountId === DEFAULT_ACCOUNT_ID && qqbot.clientSecretFile) {
+          delete qqbot.clientSecretFile;
+          changed = true;
+        }
         const accounts = qqbot.accounts as Record<string, Record<string, unknown>> | undefined;
         if (accounts && accountId in accounts) {
           const entry = accounts[accountId] as Record<string, unknown> | undefined;
           if (entry && "clientSecret" in entry) {
             delete entry.clientSecret;
             cleared = true;
+            changed = true;
+          }
+          if (entry && "clientSecretFile" in entry) {
+            delete entry.clientSecretFile;
             changed = true;
           }
           if (entry && Object.keys(entry).length === 0) {

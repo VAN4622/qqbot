@@ -37,7 +37,7 @@ interface STTConfig {
 
 function getAccountSTTBlock(cfg: Record<string, unknown>, accountId?: string | null): Record<string, any> | undefined {
   const c = cfg as any;
-  if (!accountId || accountId === "default") {
+  if (!accountId) {
     return undefined;
   }
   return c?.channels?.qqbot?.accounts?.[accountId]?.stt;
@@ -1634,6 +1634,17 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 
                 // ============ 结构化载荷检测与分发 ============
                 // 优先检测 QQBOT_PAYLOAD: 前缀，如果是结构化载荷则分发到对应处理器
+                const hasPayloadMarker = replyText.includes("QQBOT_PAYLOAD:");
+                const startsWithPayloadMarker = replyText.trimStart().startsWith("QQBOT_PAYLOAD:");
+                if (hasPayloadMarker && !startsWithPayloadMarker) {
+                  log?.error(
+                    `[qqbot:${account.accountId}] Structured payload rejected: QQBOT_PAYLOAD must start at the first line`,
+                  );
+                  await sendErrorMessage(
+                    "[QQBot] 结构化载荷格式错误：QQBOT_PAYLOAD 必须从回复第一行开始，前面不能有其他文本",
+                  );
+                  return;
+                }
                 const payloadResult = parseQQBotPayload(replyText);
                 
                 if (payloadResult.isPayload) {

@@ -223,10 +223,12 @@ Edit `~/.openclaw/openclaw.json` and add an `accounts` field under `channels.qqb
   "channels": {
     "qqbot": {
       "enabled": true,
-      "appId": "111111111",
-      "clientSecret": "secret-of-bot-1",
-
       "accounts": {
+        "default": {
+          "enabled": true,
+          "appId": "111111111",
+          "clientSecret": "secret-of-bot-1"
+        },
         "bot2": {
           "enabled": true,
           "appId": "222222222",
@@ -245,10 +247,10 @@ Edit `~/.openclaw/openclaw.json` and add an `accounts` field under `channels.qqb
 
 **Notes:**
 
-- The top-level `appId` / `clientSecret` is the **default account** (accountId = `"default"`)
+- `accounts.default` is the **default account** (accountId = `"default"`)
 - Each key under `accounts` (e.g. `bot2`, `bot3`) is the `accountId` for that bot
 - Each account can independently configure `enabled`, `name`, `allowFrom`, etc. `systemPrompt` is deprecated; move fixed prompts to the OpenClaw agent/system side.
-- The default account should remain at the top level; do not move it to `accounts.default`
+- Legacy top-level `appId` / `clientSecret` is still supported for compatibility, but `accounts.default` is the recommended format
 
 ### Multi-Account Voice Configuration
 
@@ -277,8 +279,6 @@ Example:
   "channels": {
     "qqbot": {
       "enabled": true,
-      "appId": "111111111",
-      "clientSecret": "secret-of-bot-1",
       "stt": {
         "provider": "siliconflow",
         "model": "FunAudioLLM/SenseVoiceSmall"
@@ -289,6 +289,11 @@ Example:
         "voice": "alloy"
       },
       "accounts": {
+        "default": {
+          "enabled": true,
+          "appId": "111111111",
+          "clientSecret": "secret-of-bot-1"
+        },
         "bot2": {
           "enabled": true,
           "appId": "222222222",
@@ -305,7 +310,7 @@ Example:
 }
 ```
 
-- In this example, `default` uses the top-level `stt/tts`
+- In this example, the default account lives under `accounts.default`
 - `bot2` inherits the top-level `stt` and overrides its own `tts.voice`
 - If an account does not define `stt/tts`, it falls back to the global plugin config
 

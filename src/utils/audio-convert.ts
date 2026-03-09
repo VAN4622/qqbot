@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { decode, encode, isSilk } from "silk-wasm";
 import { detectFfmpeg, isWindows } from "./platform.js";
 
@@ -186,7 +187,7 @@ function resolveTTSFromBlock(
 
 function getAccountTTSBlock(cfg: Record<string, unknown>, accountId?: string | null): Record<string, any> | undefined {
   const c = cfg as any;
-  if (!accountId || accountId === "default") {
+  if (!accountId) {
     return undefined;
   }
   return c?.channels?.qqbot?.accounts?.[accountId]?.tts;
@@ -378,7 +379,7 @@ export async function textToSilk(
   const { silkBuffer, duration } = await pcmToSilk(pcmBuffer, sampleRate);
 
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-  const silkPath = path.join(outputDir, `tts-${Date.now()}.silk`);
+  const silkPath = path.join(outputDir, `tts-${Date.now()}-${randomBytes(4).toString("hex")}.silk`);
   fs.writeFileSync(silkPath, silkBuffer);
 
   return { silkPath, silkBase64: silkBuffer.toString("base64"), duration };
