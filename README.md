@@ -248,7 +248,66 @@ Edit `~/.openclaw/openclaw.json` and add an `accounts` field under `channels.qqb
 - The top-level `appId` / `clientSecret` is the **default account** (accountId = `"default"`)
 - Each key under `accounts` (e.g. `bot2`, `bot3`) is the `accountId` for that bot
 - Each account can independently configure `enabled`, `name`, `allowFrom`, etc. `systemPrompt` is deprecated; move fixed prompts to the OpenClaw agent/system side.
-- You may also skip the top-level default account and only configure bots inside `accounts`
+- The default account should remain at the top level; do not move it to `accounts.default`
+
+### Multi-Account Voice Configuration
+
+`STT/TTS` now supports per-account overrides with fallback:
+
+#### STT priority
+
+| Priority | Config Path | Scope |
+|----------|------------|-------|
+| 1 (highest) | `channels.qqbot.accounts.<accountId>.stt` | Account-level |
+| 2 | `channels.qqbot.stt` | Plugin-global |
+| 3 (fallback) | `tools.media.audio.models[0]` | Framework-level |
+
+#### TTS priority
+
+| Priority | Config Path | Scope |
+|----------|------------|-------|
+| 1 (highest) | `channels.qqbot.accounts.<accountId>.tts` | Account-level |
+| 2 | `channels.qqbot.tts` | Plugin-global |
+| 3 (fallback) | `messages.tts` | Framework-level |
+
+Example:
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "enabled": true,
+      "appId": "111111111",
+      "clientSecret": "secret-of-bot-1",
+      "stt": {
+        "provider": "siliconflow",
+        "model": "FunAudioLLM/SenseVoiceSmall"
+      },
+      "tts": {
+        "provider": "openai",
+        "model": "gpt-4o-mini-tts",
+        "voice": "alloy"
+      },
+      "accounts": {
+        "bot2": {
+          "enabled": true,
+          "appId": "222222222",
+          "clientSecret": "secret-of-bot-2",
+          "tts": {
+            "provider": "openai",
+            "model": "gpt-4o-mini-tts",
+            "voice": "nova"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+- In this example, `default` uses the top-level `stt/tts`
+- `bot2` inherits the top-level `stt` and overrides its own `tts.voice`
+- If an account does not define `stt/tts`, it falls back to the global plugin config
 
 Add a second bot via CLI (if the framework supports the `--account` parameter):
 
@@ -295,12 +354,13 @@ openclaw message send --channel "qqbot" \
 
 ### STT (Speech-to-Text) — Transcribe Incoming Voice Messages
 
-STT supports two-level configuration with priority fallback:
+STT supports three-level configuration with priority fallback:
 
 | Priority | Config Path | Scope |
 |----------|------------|-------|
-| 1 (highest) | `channels.qqbot.stt` | Plugin-specific |
-| 2 (fallback) | `tools.media.audio.models[0]` | Framework-level |
+| 1 (highest) | `channels.qqbot.accounts.<accountId>.stt` | Account-level |
+| 2 | `channels.qqbot.stt` | Plugin-global |
+| 3 (fallback) | `tools.media.audio.models[0]` | Framework-level |
 
 ```json
 {
@@ -323,8 +383,9 @@ STT supports two-level configuration with priority fallback:
 
 | Priority | Config Path | Scope |
 |----------|------------|-------|
-| 1 (highest) | `channels.qqbot.tts` | Plugin-specific |
-| 2 (fallback) | `messages.tts` | Framework-level |
+| 1 (highest) | `channels.qqbot.accounts.<accountId>.tts` | Account-level |
+| 2 | `channels.qqbot.tts` | Plugin-global |
+| 3 (fallback) | `messages.tts` | Framework-level |
 
 ```json
 {

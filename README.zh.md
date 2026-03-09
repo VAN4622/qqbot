@@ -244,7 +244,66 @@ openclaw gateway
 - 顶层的 `appId` / `clientSecret` 是**默认账户**（accountId = `"default"`）
 - `accounts` 下的每个 key（如 `bot2`、`bot3`）就是该账户的 `accountId`
 - 每个账户都可以独立配置 `enabled`、`name`、`allowFrom` 等字段；`systemPrompt` 已弃用，请迁移到 OpenClaw 的 agent/system 配置侧
-- 也可以不配顶层默认账户，只在 `accounts` 里配置所有机器人
+- 默认账户仍需保留在顶层；不要写成 `accounts.default`
+
+### 多账户语音配置
+
+`STT/TTS` 现在支持按账号分别配置，优先级如下：
+
+#### STT 优先级
+
+| 优先级 | 配置路径 | 作用域 |
+|--------|----------|--------|
+| 1（最高） | `channels.qqbot.accounts.<accountId>.stt` | 账号级 |
+| 2 | `channels.qqbot.stt` | 插件全局 |
+| 3（回退） | `tools.media.audio.models[0]` | 框架级 |
+
+#### TTS 优先级
+
+| 优先级 | 配置路径 | 作用域 |
+|--------|----------|--------|
+| 1（最高） | `channels.qqbot.accounts.<accountId>.tts` | 账号级 |
+| 2 | `channels.qqbot.tts` | 插件全局 |
+| 3（回退） | `messages.tts` | 框架级 |
+
+示例：
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "enabled": true,
+      "appId": "111111111",
+      "clientSecret": "secret-of-bot-1",
+      "stt": {
+        "provider": "siliconflow",
+        "model": "FunAudioLLM/SenseVoiceSmall"
+      },
+      "tts": {
+        "provider": "openai",
+        "model": "gpt-4o-mini-tts",
+        "voice": "alloy"
+      },
+      "accounts": {
+        "bot2": {
+          "enabled": true,
+          "appId": "222222222",
+          "clientSecret": "secret-of-bot-2",
+          "tts": {
+            "provider": "openai",
+            "model": "gpt-4o-mini-tts",
+            "voice": "nova"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+- 上例中，`default` 账号使用顶层 `stt/tts`
+- `bot2` 继承顶层 `stt`，并覆盖自己的 `tts.voice`
+- 如果某个账号未配置 `stt/tts`，会自动回退到全局配置
 
 通过 CLI 添加第二个机器人（如果框架支持 `--account` 参数）：
 
@@ -291,12 +350,13 @@ openclaw message send --channel "qqbot" \
 
 ### STT（语音转文字）— 自动转录用户发来的语音消息
 
-STT 支持两级配置，按优先级查找：
+STT 支持三级配置，按优先级查找：
 
 | 优先级 | 配置路径 | 作用域 |
 |--------|----------|--------|
-| 1（最高） | `channels.qqbot.stt` | 插件专属 |
-| 2（回退） | `tools.media.audio.models[0]` | 框架级 |
+| 1（最高） | `channels.qqbot.accounts.<accountId>.stt` | 账号级 |
+| 2 | `channels.qqbot.stt` | 插件全局 |
+| 3（回退） | `tools.media.audio.models[0]` | 框架级 |
 
 ```json
 {
@@ -319,8 +379,9 @@ STT 支持两级配置，按优先级查找：
 
 | 优先级 | 配置路径 | 作用域 |
 |--------|----------|--------|
-| 1（最高） | `channels.qqbot.tts` | 插件专属 |
-| 2（回退） | `messages.tts` | 框架级 |
+| 1（最高） | `channels.qqbot.accounts.<accountId>.tts` | 账号级 |
+| 2 | `channels.qqbot.tts` | 插件全局 |
+| 3（回退） | `messages.tts` | 框架级 |
 
 ```json
 {
