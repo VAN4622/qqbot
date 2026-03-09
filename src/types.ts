@@ -17,7 +17,10 @@ export interface ResolvedQQBotAccount {
   appId: string;
   clientSecret: string;
   secretSource: "config" | "file" | "env" | "none";
-  /** 系统提示词 */
+  /**
+   * @deprecated 不再由 qqbot 插件注入提示词。
+   * 请将固定提示迁移到 OpenClaw 的 agent/system 配置侧。
+   */
   systemPrompt?: string;
   /** 图床服务器公网地址 */
   imageServerBaseUrl?: string;
@@ -37,7 +40,10 @@ export interface QQBotAccountConfig {
   clientSecretFile?: string;
   dmPolicy?: "open" | "pairing" | "allowlist";
   allowFrom?: string[];
-  /** 系统提示词，会添加在用户消息前面 */
+  /**
+   * @deprecated 不再由 qqbot 插件注入提示词。
+   * 请将固定提示迁移到 OpenClaw 的 agent/system 配置侧。
+   */
   systemPrompt?: string;
   /** 图床服务器公网地址，用于发送图片，例如 http://your-ip:18765 */
   imageServerBaseUrl?: string;
@@ -53,6 +59,30 @@ export interface QQBotAccountConfig {
    * 统一管理入站（STT）和出站（上传）的音频格式转换行为
    */
   audioFormatPolicy?: AudioFormatPolicy;
+  /** 账号级 STT 配置，优先级高于 channels.qqbot.stt */
+  stt?: QQBotSTTConfig;
+  /** 账号级 TTS 配置，优先级高于 channels.qqbot.tts */
+  tts?: QQBotTTSConfig;
+}
+
+export interface QQBotSTTConfig {
+  enabled?: boolean;
+  provider?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+}
+
+export interface QQBotTTSConfig {
+  enabled?: boolean;
+  provider?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  voice?: string;
+  authStyle?: "bearer" | "api-key";
+  queryParams?: Record<string, string>;
+  speed?: number;
 }
 
 /**

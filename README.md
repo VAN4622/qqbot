@@ -247,7 +247,7 @@ Edit `~/.openclaw/openclaw.json` and add an `accounts` field under `channels.qqb
 
 - The top-level `appId` / `clientSecret` is the **default account** (accountId = `"default"`)
 - Each key under `accounts` (e.g. `bot2`, `bot3`) is the `accountId` for that bot
-- Each account can independently configure `enabled`, `name`, `allowFrom`, `systemPrompt`, etc.
+- Each account can independently configure `enabled`, `name`, `allowFrom`, etc. `systemPrompt` is deprecated; move fixed prompts to the OpenClaw agent/system side.
 - You may also skip the top-level default account and only configure bots inside `accounts`
 
 Add a second bot via CLI (if the framework supports the `--account` parameter):

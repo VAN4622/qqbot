@@ -184,8 +184,28 @@ function resolveTTSFromBlock(
   };
 }
 
-export function resolveTTSConfig(cfg: Record<string, unknown>): TTSConfig | null {
+function getAccountTTSBlock(cfg: Record<string, unknown>, accountId?: string | null): Record<string, any> | undefined {
   const c = cfg as any;
+  if (!accountId || accountId === "default") {
+    return undefined;
+  }
+  return c?.channels?.qqbot?.accounts?.[accountId]?.tts;
+}
+
+export function resolveTTSConfig(cfg: Record<string, unknown>, accountId?: string | null): TTSConfig | null {
+  const c = cfg as any;
+  const accountTts = getAccountTTSBlock(cfg, accountId);
+
+  if (accountTts !== undefined) {
+    if (accountTts?.enabled === false) {
+      return null;
+    }
+
+    const providerId: string = accountTts?.provider || "openai";
+    const providerCfg = c?.models?.providers?.[providerId];
+    const result = resolveTTSFromBlock(accountTts, providerCfg);
+    if (result) return result;
+  }
 
   // 优先使用 channels.qqbot.tts（插件专属配置）
   const channelTts = c?.channels?.qqbot?.tts;

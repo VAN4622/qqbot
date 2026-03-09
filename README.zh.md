@@ -243,7 +243,7 @@ openclaw gateway
 
 - 顶层的 `appId` / `clientSecret` 是**默认账户**（accountId = `"default"`）
 - `accounts` 下的每个 key（如 `bot2`、`bot3`）就是该账户的 `accountId`
-- 每个账户都可以独立配置 `enabled`、`name`、`allowFrom`、`systemPrompt` 等字段
+- 每个账户都可以独立配置 `enabled`、`name`、`allowFrom` 等字段；`systemPrompt` 已弃用，请迁移到 OpenClaw 的 agent/system 配置侧
 - 也可以不配顶层默认账户，只在 `accounts` 里配置所有机器人
 
 通过 CLI 添加第二个机器人（如果框架支持 `--account` 参数）：
