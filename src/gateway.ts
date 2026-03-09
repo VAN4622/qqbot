@@ -1057,6 +1057,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         }
         if (transcriptText) {
           agentBodyParts.push(`[语音转写]\n${transcriptText}`);
+          agentBodyParts.push("[回复偏好]\n当前消息是语音消息；在自然且合适时，优先使用语音回复。");
         }
         if (agentBodyParts.length === 0 && fallbackAttachmentNotes.length > 0) {
           agentBodyParts.push(["[附件说明]", ...fallbackAttachmentNotes].join("\n"));
@@ -1640,8 +1641,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   log?.error(
                     `[qqbot:${account.accountId}] Structured payload rejected: QQBOT_PAYLOAD must start at the first line`,
                   );
-                  await sendErrorMessage(
-                    "[QQBot] 结构化载荷格式错误：QQBOT_PAYLOAD 必须从回复第一行开始，前面不能有其他文本",
+                  log?.error(
+                    `[qqbot:${account.accountId}] Suppressing malformed QQBOT_PAYLOAD instead of sending internal protocol text to the user`,
                   );
                   return;
                 }
@@ -1649,9 +1650,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 
                 if (payloadResult.isPayload) {
                   if (payloadResult.error) {
-                    // 载荷解析失败，发送错误提示
+                    // 载荷解析失败属于内部协议错误，只记录日志，不回传给用户
                     log?.error(`[qqbot:${account.accountId}] Payload parse error: ${payloadResult.error}`);
-                    await sendErrorMessage(`[QQBot] 载荷解析失败: ${payloadResult.error}`);
+                    log?.error(
+                      `[qqbot:${account.accountId}] Suppressing invalid QQBOT_PAYLOAD instead of sending internal protocol text to the user`,
+                    );
                     return;
                   }
                   
