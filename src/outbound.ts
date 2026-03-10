@@ -3,7 +3,7 @@
  */
 
 import * as path from "path";
-import type { ResolvedQQBotAccount } from "./types.js";
+import type { QQBotIMStyleReplyConfig, ResolvedQQBotAccount } from "./types.js";
 import { decodeCronPayload } from "./utils/payload.js";
 import {
   getAccessToken, 
@@ -27,9 +27,14 @@ import { checkFileSize, readFileAsync, fileExistsAsync, isLargeFile, formatFileS
 import { isLocalPath as isLocalFilePath, normalizePath, sanitizeFileName } from "./utils/platform.js";
 
 // ============ 消息回复限流器 ============
-// 同一 message_id 1小时内最多回复 4 次，超过 1 小时无法被动回复（需改为主动消息）
-const MESSAGE_REPLY_LIMIT = 4;
+// 同一 message_id 1小时内最多回复 5 次，超过 1 小时无法被动回复（需改为主动消息）
+const MESSAGE_REPLY_LIMIT = 5;
 const MESSAGE_REPLY_TTL = 60 * 60 * 1000; // 1小时
+const IM_STYLE_MIN_LENGTH = 48;
+const IM_STYLE_MAX_PARTS = 3;
+const IM_STYLE_TARGET_PART_LENGTH = 36;
+const IM_STYLE_MAX_PART_LENGTH = 72;
+const IM_STYLE_PART_DELAY_MS = 450;
 
 interface MessageReplyRecord {
   count: number;
@@ -37,6 +42,184 @@ interface MessageReplyRecord {
 }
 
 const messageReplyTracker = new Map<string, MessageReplyRecord>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getImStyleDelayMs(delayMinMs: number, delayMaxMs: number, text: string): number {
+  const lengthDelay = Math.min(450, Math.max(0, text.trim().length * 10));
+  const base = delayMinMs >= delayMaxMs
+    ? delayMinMs
+    : delayMinMs + Math.floor(Math.random() * (delayMaxMs - delayMinMs + 1));
+  const jitter = Math.floor(Math.random() * 120);
+  return Math.max(0, base + lengthDelay + jitter);
+}
+
+function containsStructuredReplyProtocol(text: string): boolean {
+  return (
+    /<(qqimg|qqvoice|qqvideo|qqfile)>/i.test(text) ||
+    text.includes("QQBOT_PAYLOAD:") ||
+    text.includes("```") ||
+    /(^|\n)\s*(#{1,6}\s|[-*]\s|\d+\.\s|>\s)/.test(text)
+  );
+}
+
+function resolveImStyleReplyConfig(account: ResolvedQQBotAccount): Required<QQBotIMStyleReplyConfig> {
+  const cfg = account.imStyleReply ?? {};
+  const fallbackDelay = Math.max(0, cfg.delayMs ?? IM_STYLE_PART_DELAY_MS);
+  const delayMinMs = Math.max(0, cfg.delayMinMs ?? fallbackDelay);
+  const delayMaxMs = Math.max(delayMinMs, cfg.delayMaxMs ?? fallbackDelay);
+  return {
+    enabled: cfg.enabled !== false,
+    minLength: Math.max(1, cfg.minLength ?? IM_STYLE_MIN_LENGTH),
+    maxParts: Math.max(1, Math.min(5, cfg.maxParts ?? IM_STYLE_MAX_PARTS)),
+    targetPartLength: Math.max(1, cfg.targetPartLength ?? IM_STYLE_TARGET_PART_LENGTH),
+    maxPartLength: Math.max(1, cfg.maxPartLength ?? IM_STYLE_MAX_PART_LENGTH),
+    delayMs: fallbackDelay,
+    delayMinMs,
+    delayMaxMs,
+  };
+}
+
+function splitLongImSegment(segment: string, maxPartLength: number): string[] {
+  const trimmed = segment.trim();
+  if (trimmed.length <= maxPartLength) {
+    return [trimmed];
+  }
+
+  const parts: string[] = [];
+  let remaining = trimmed;
+
+  while (remaining.length > maxPartLength) {
+    let splitAt = -1;
+    for (let i = Math.min(maxPartLength, remaining.length - 1); i >= Math.floor(maxPartLength * 0.5); i--) {
+      const char = remaining[i];
+      if (char === "，" || char === "," || char === "、" || char === "：" || char === ":" || char === " " || char === "\t") {
+        splitAt = i + 1;
+        break;
+      }
+    }
+    if (splitAt <= 0) {
+      splitAt = maxPartLength;
+    }
+    parts.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+
+  if (remaining) {
+    parts.push(remaining);
+  }
+
+  return parts.filter(Boolean);
+}
+
+function splitIntoImStyleParts(text: string, config: Required<QQBotIMStyleReplyConfig>, maxPartsOverride?: number): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return [];
+  }
+  const maxParts = Math.max(1, Math.min(config.maxParts, maxPartsOverride ?? config.maxParts));
+  if (!config.enabled || normalized.length < config.minLength || maxParts <= 1) {
+    return [normalized];
+  }
+
+  const rawSegments: string[] = [];
+  let current = "";
+  for (const ch of normalized) {
+    if (ch === "\n") {
+      if (current.trim()) {
+        rawSegments.push(current.trim());
+      }
+      current = "";
+      continue;
+    }
+    current += ch;
+    if ("。！？!?；;".includes(ch)) {
+      if (current.trim()) {
+        rawSegments.push(current.trim());
+      }
+      current = "";
+    }
+  }
+  if (current.trim()) {
+    rawSegments.push(current.trim());
+  }
+
+  const segments = rawSegments.length > 0
+    ? rawSegments.flatMap((segment) => splitLongImSegment(segment, config.maxPartLength))
+    : splitLongImSegment(normalized, config.maxPartLength);
+  if (segments.length <= 1) {
+    return [normalized];
+  }
+
+  const parts: string[] = [];
+  let part = "";
+  for (const segment of segments) {
+    if (!part) {
+      part = segment;
+      continue;
+    }
+
+    const nextLength = part.length + 1 + segment.length;
+    if (nextLength <= config.targetPartLength || part.length < Math.floor(config.targetPartLength * 0.5)) {
+      part = `${part}\n${segment}`;
+      continue;
+    }
+
+    parts.push(part);
+    part = segment;
+  }
+  if (part) {
+    parts.push(part);
+  }
+
+  if (parts.length <= 1) {
+    return [normalized];
+  }
+
+  if (parts.length > maxParts) {
+    const head = parts.slice(0, maxParts - 1);
+    const tail = parts.slice(maxParts - 1).join("\n");
+    return [...head, tail];
+  }
+
+  return parts;
+}
+
+async function sendPlainTextMessage(
+  accessToken: string,
+  target: { type: "c2c" | "group" | "channel"; id: string },
+  text: string,
+  replyToId?: string | null,
+): Promise<OutboundResult> {
+  if (replyToId) {
+    if (target.type === "c2c") {
+      const result = await sendC2CMessage(accessToken, target.id, text, replyToId);
+      recordMessageReply(replyToId);
+      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+    }
+    if (target.type === "group") {
+      const result = await sendGroupMessage(accessToken, target.id, text, replyToId);
+      recordMessageReply(replyToId);
+      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+    }
+    const result = await sendChannelMessage(accessToken, target.id, text, replyToId);
+    recordMessageReply(replyToId);
+    return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+  }
+
+  if (target.type === "c2c") {
+    const result = await sendProactiveC2CMessage(accessToken, target.id, text);
+    return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+  }
+  if (target.type === "group") {
+    const result = await sendProactiveGroupMessage(accessToken, target.id, text);
+    return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+  }
+  const result = await sendChannelMessage(accessToken, target.id, text);
+  return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+}
 
 /** 限流检查结果 */
 export interface ReplyLimitResult {
@@ -233,7 +416,7 @@ function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: strin
 
 /**
  * 发送文本消息
- * - 有 replyToId: 被动回复，1小时内最多回复4次
+ * - 有 replyToId: 被动回复，1小时内最多回复5次
  * - 无 replyToId: 主动发送，有配额限制（每月4条/用户/群）
  * 
  * 注意：
@@ -245,6 +428,8 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
   const { to, account } = ctx;
   let { text, replyToId } = ctx;
   let fallbackToProactive = false;
+  let passiveReplyRemaining = 0;
+  const imStyleReplyConfig = resolveImStyleReplyConfig(account);
 
   console.log("[qqbot] sendText ctx:", JSON.stringify({ to, text: text?.slice(0, 50), replyToId, accountId: account.accountId }, null, 2));
 
@@ -268,6 +453,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
         };
       }
     } else {
+      passiveReplyRemaining = limitCheck.remaining;
       console.log(`[qqbot] sendText: 消息 ${replyToId} 剩余被动回复次数: ${limitCheck.remaining}/${MESSAGE_REPLY_LIMIT}`);
     }
   }
@@ -393,34 +579,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
       try {
         if (item.type === "text") {
           // 发送文本
-          if (replyToId) {
-            // 被动回复
-            if (target.type === "c2c") {
-              const result = await sendC2CMessage(accessToken, target.id, item.content, replyToId);
-              recordMessageReply(replyToId);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupMessage(accessToken, target.id, item.content, replyToId);
-              recordMessageReply(replyToId);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, item.content, replyToId);
-              recordMessageReply(replyToId);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            }
-          } else {
-            // 主动消息
-            if (target.type === "c2c") {
-              const result = await sendProactiveC2CMessage(accessToken, target.id, item.content);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendProactiveGroupMessage(accessToken, target.id, item.content);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, item.content);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            }
-          }
+          lastResult = await sendPlainTextMessage(accessToken, target, item.content, replyToId);
           console.log(`[qqbot] sendText: Sent text part: ${item.content.slice(0, 30)}...`);
         } else if (item.type === "image") {
           // 发送图片
@@ -663,38 +822,35 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
     const target = parseTarget(to);
     console.log("[qqbot] sendText target:", JSON.stringify(target));
 
-    // 如果没有 replyToId，使用主动发送接口
-    if (!replyToId) {
-      if (target.type === "c2c") {
-        const result = await sendProactiveC2CMessage(accessToken, target.id, text);
-        return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-      } else if (target.type === "group") {
-        const result = await sendProactiveGroupMessage(accessToken, target.id, text);
-        return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-      } else {
-        // 频道暂不支持主动消息
-        const result = await sendChannelMessage(accessToken, target.id, text);
-        return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+    if (replyToId && !containsStructuredReplyProtocol(text)) {
+      const desiredParts = splitIntoImStyleParts(
+        text,
+        imStyleReplyConfig,
+        Math.max(1, passiveReplyRemaining || 1),
+      );
+      if (desiredParts.length > 1) {
+        console.log(`[qqbot] sendText: Using IM-style split reply (${desiredParts.length} parts)`);
+        let lastResult: OutboundResult = { channel: "qqbot" };
+        for (let i = 0; i < desiredParts.length; i++) {
+          lastResult = await sendPlainTextMessage(accessToken, target, desiredParts[i]!, replyToId);
+          if (i < desiredParts.length - 1) {
+            await sleep(getImStyleDelayMs(
+              imStyleReplyConfig.delayMinMs,
+              imStyleReplyConfig.delayMaxMs,
+              desiredParts[i]!,
+            ));
+          }
+        }
+        return lastResult;
       }
     }
 
-    // 有 replyToId，使用被动回复接口
-    if (target.type === "c2c") {
-      const result = await sendC2CMessage(accessToken, target.id, text, replyToId);
-      // 记录回复次数
-      recordMessageReply(replyToId);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    } else if (target.type === "group") {
-      const result = await sendGroupMessage(accessToken, target.id, text, replyToId);
-      // 记录回复次数
-      recordMessageReply(replyToId);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    } else {
-      const result = await sendChannelMessage(accessToken, target.id, text, replyToId);
-      // 记录回复次数
-      recordMessageReply(replyToId);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
+    // 如果没有 replyToId，使用主动发送接口
+    if (!replyToId) {
+      return await sendPlainTextMessage(accessToken, target, text, null);
     }
+
+    return await sendPlainTextMessage(accessToken, target, text, replyToId);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { channel: "qqbot", error: message };

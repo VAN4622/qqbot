@@ -2,7 +2,7 @@ import WebSocket from "ws";
 import path from "node:path";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
-import type { ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
+import type { QQBotIMStyleReplyConfig, ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
 import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, sendC2CImageMessage, sendGroupImageMessage, sendC2CVoiceMessage, sendGroupVoiceMessage, sendC2CVideoMessage, sendGroupVideoMessage, sendC2CFileMessage, sendGroupFileMessage, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify } from "./api.js";
 import { loadSession, saveSession, clearSession, type SessionState } from "./session-store.js";
 import { recordKnownUser, flushKnownUsers } from "./known-users.js";
@@ -172,8 +172,8 @@ const PER_USER_QUEUE_SIZE = 20; // 单用户最大排队数
 const MAX_CONCURRENT_USERS = 10; // 最大同时处理的用户数
 
 // ============ 消息回复限流器 ============
-// 同一 message_id 1小时内最多回复 4 次，超过1小时需降级为主动消息
-const MESSAGE_REPLY_LIMIT = 4;
+// 同一 message_id 1小时内最多回复 5 次，超过1小时需降级为主动消息
+const MESSAGE_REPLY_LIMIT = 5;
 const MESSAGE_REPLY_TTL = 60 * 60 * 1000; // 1小时
 
 interface MessageReplyRecord {
@@ -185,6 +185,10 @@ const messageReplyTracker = new Map<string, MessageReplyRecord>();
 const PENDING_HISTORY_LIMIT = 20;
 const MAX_PENDING_HISTORY_KEYS = 1000;
 const PENDING_HISTORY_TTL_MS = 24 * 60 * 60 * 1000;
+const IM_STYLE_MIN_LENGTH = 48;
+const IM_STYLE_MAX_PARTS = 3;
+const IM_STYLE_TARGET_PART_LENGTH = 36;
+const IM_STYLE_MAX_PART_LENGTH = 72;
 
 type PendingHistoryEntry = {
   sender: string;
@@ -518,6 +522,137 @@ function filterInternalMarkers(text: string): string {
   result = result.replace(/\n{3,}/g, "\n\n").trim();
   
   return result;
+}
+
+function containsImStyleUnsafeFormatting(text: string): boolean {
+  return (
+    text.includes("QQBOT_PAYLOAD:") ||
+    text.includes("```") ||
+    /<(qqimg|qqvoice|qqvideo|qqfile)>/i.test(text) ||
+    /(^|\n)\s*(#{1,6}\s|[-*]\s|\d+\.\s|>\s)/.test(text)
+  );
+}
+
+function resolveImStyleReplyConfig(account: ResolvedQQBotAccount): Required<QQBotIMStyleReplyConfig> {
+  const cfg = account.imStyleReply ?? {};
+  const fallbackDelay = Math.max(0, cfg.delayMs ?? 450);
+  const delayMinMs = Math.max(0, cfg.delayMinMs ?? fallbackDelay);
+  const delayMaxMs = Math.max(delayMinMs, cfg.delayMaxMs ?? fallbackDelay);
+  return {
+    enabled: cfg.enabled !== false,
+    minLength: Math.max(1, cfg.minLength ?? IM_STYLE_MIN_LENGTH),
+    maxParts: Math.max(1, Math.min(5, cfg.maxParts ?? IM_STYLE_MAX_PARTS)),
+    targetPartLength: Math.max(1, cfg.targetPartLength ?? IM_STYLE_TARGET_PART_LENGTH),
+    maxPartLength: Math.max(1, cfg.maxPartLength ?? IM_STYLE_MAX_PART_LENGTH),
+    delayMs: fallbackDelay,
+    delayMinMs,
+    delayMaxMs,
+  };
+}
+
+function splitLongImSegment(segment: string, maxPartLength: number): string[] {
+  const trimmed = segment.trim();
+  if (trimmed.length <= maxPartLength) {
+    return [trimmed];
+  }
+
+  const parts: string[] = [];
+  let remaining = trimmed;
+  while (remaining.length > maxPartLength) {
+    let splitAt = -1;
+    for (let i = Math.min(maxPartLength, remaining.length - 1); i >= Math.floor(maxPartLength * 0.5); i--) {
+      const ch = remaining[i];
+      if (ch === "，" || ch === "," || ch === "、" || ch === "：" || ch === ":" || ch === " " || ch === "\t") {
+        splitAt = i + 1;
+        break;
+      }
+    }
+    if (splitAt <= 0) {
+      splitAt = maxPartLength;
+    }
+    parts.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining) {
+    parts.push(remaining);
+  }
+  return parts.filter(Boolean);
+}
+
+function splitIntoImStyleParts(
+  text: string,
+  config: Required<QQBotIMStyleReplyConfig>,
+  maxPartsOverride?: number,
+): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  const maxParts = Math.max(1, Math.min(config.maxParts, maxPartsOverride ?? config.maxParts));
+  if (!normalized || !config.enabled || normalized.length < config.minLength || maxParts <= 1 || containsImStyleUnsafeFormatting(normalized)) {
+    return normalized ? [normalized] : [];
+  }
+
+  const rawSegments: string[] = [];
+  let current = "";
+  for (const ch of normalized) {
+    if (ch === "\n") {
+      if (current.trim()) rawSegments.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+    if ("。！？!?；;".includes(ch)) {
+      if (current.trim()) rawSegments.push(current.trim());
+      current = "";
+    }
+  }
+  if (current.trim()) {
+    rawSegments.push(current.trim());
+  }
+
+  const segments = rawSegments.length > 0
+    ? rawSegments.flatMap((segment) => splitLongImSegment(segment, config.maxPartLength))
+    : splitLongImSegment(normalized, config.maxPartLength);
+  if (segments.length <= 1) {
+    return [normalized];
+  }
+
+  const parts: string[] = [];
+  let part = "";
+  for (const segment of segments) {
+    if (!part) {
+      part = segment;
+      continue;
+    }
+    const nextLength = part.length + 1 + segment.length;
+    if (nextLength <= config.targetPartLength || part.length < Math.floor(config.targetPartLength * 0.5)) {
+      part = `${part}\n${segment}`;
+      continue;
+    }
+    parts.push(part);
+    part = segment;
+  }
+  if (part) {
+    parts.push(part);
+  }
+
+  if (parts.length > maxParts) {
+    const head = parts.slice(0, maxParts - 1);
+    const tail = parts.slice(maxParts - 1).join("\n");
+    return [...head, tail];
+  }
+  return parts;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getImStyleDelayMs(delayMinMs: number, delayMaxMs: number, text: string): number {
+  const lengthDelay = Math.min(450, Math.max(0, text.trim().length * 10));
+  const base = delayMinMs >= delayMaxMs
+    ? delayMinMs
+    : delayMinMs + Math.floor(Math.random() * (delayMaxMs - delayMinMs + 1));
+  const jitter = Math.floor(Math.random() * 120);
+  return Math.max(0, base + lengthDelay + jitter);
 }
 
 export interface GatewayContext {
@@ -1190,6 +1325,50 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           }
         };
 
+        const imStyleReplyConfig = resolveImStyleReplyConfig(account);
+
+        const sendPlainTextReply = async (text: string) => {
+          const trimmed = text.trim();
+          if (!trimmed) {
+            return;
+          }
+          await sendWithTokenRetry(async (token) => {
+            if (event.type === "c2c") {
+              await sendC2CMessage(token, event.senderId, trimmed, event.messageId);
+            } else if (event.type === "group" && event.groupOpenid) {
+              await sendGroupMessage(token, event.groupOpenid, trimmed, event.messageId);
+            } else if (event.channelId) {
+              await sendChannelMessage(token, event.channelId, trimmed, event.messageId);
+            }
+          });
+          recordMessageReply(event.messageId);
+        };
+
+        const sendReplyTextWithImStyle = async (text: string) => {
+          const trimmed = text.trim();
+          if (!trimmed) {
+            return;
+          }
+
+          const replyLimit = checkMessageReplyLimit(event.messageId);
+          const parts = splitIntoImStyleParts(trimmed, imStyleReplyConfig, replyLimit.remaining);
+
+          if (parts.length > 1) {
+            log?.info(`[qqbot:${account.accountId}] IM-style split reply enabled (${parts.length} parts, remaining=${replyLimit.remaining}/${MESSAGE_REPLY_LIMIT})`);
+          }
+
+          for (let i = 0; i < parts.length; i++) {
+            await sendPlainTextReply(parts[i]!);
+            if (i < parts.length - 1 && imStyleReplyConfig.delayMs > 0) {
+              await sleep(getImStyleDelayMs(
+                imStyleReplyConfig.delayMinMs,
+                imStyleReplyConfig.delayMaxMs,
+                parts[i]!,
+              ));
+            }
+          }
+        };
+
         try {
           const messagesConfig = pluginRuntime.channel.reply.resolveEffectiveMessagesConfig(cfg, route.agentId);
 
@@ -1363,15 +1542,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     if (item.type === "text") {
                       // 发送文本
                       try {
-                        await sendWithTokenRetry(async (token) => {
-                          if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, item.content, event.messageId);
-                          } else if (event.type === "group" && event.groupOpenid) {
-                            await sendGroupMessage(token, event.groupOpenid, item.content, event.messageId);
-                          } else if (event.channelId) {
-                            await sendChannelMessage(token, event.channelId, item.content, event.messageId);
-                          }
-                        });
+                        await sendReplyTextWithImStyle(item.content);
                         log?.info(`[qqbot:${account.accountId}] Sent text: ${item.content.slice(0, 50)}...`);
                       } catch (err) {
                         log?.error(`[qqbot:${account.accountId}] Failed to send text: ${err}`);
@@ -2149,15 +2320,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   // 🔹 第三步：发送带公网图片的 markdown 消息
                   if (textWithoutImages.trim()) {
                     try {
-                      await sendWithTokenRetry(async (token) => {
-                        if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId);
-                        } else if (event.type === "group" && event.groupOpenid) {
-                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId);
-                        } else if (event.channelId) {
-                          await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId);
-                        }
-                      });
+                      await sendReplyTextWithImStyle(textWithoutImages);
                       log?.info(`[qqbot:${account.accountId}] Sent markdown message with ${httpImageUrls.length} HTTP images (${event.type})`);
                     } catch (err) {
                       log?.error(`[qqbot:${account.accountId}] Failed to send markdown message: ${err}`);
@@ -2200,15 +2363,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
                     // 发送文本消息
                     if (textWithoutImages.trim()) {
-                      await sendWithTokenRetry(async (token) => {
-                        if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId);
-                        } else if (event.type === "group" && event.groupOpenid) {
-                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId);
-                        } else if (event.channelId) {
-                          await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId);
-                        }
-                      });
+                      await sendReplyTextWithImStyle(textWithoutImages);
                       log?.info(`[qqbot:${account.accountId}] Sent text reply (${event.type})`);
                     }
                   } catch (err) {

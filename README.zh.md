@@ -310,6 +310,70 @@ openclaw gateway
 - `bot2` 继承顶层 `stt`，并覆盖自己的 `tts.voice`
 - 如果某个账号未配置 `stt/tts`，会自动回退到全局配置
 
+### IM 风格短句连发配置
+
+QQBot 支持把较长的纯文本被动回复拆成 2-3 条短句连续发送，更接近日常 IM 聊天节奏。配置优先级如下：
+
+| 优先级 | 配置位置 | 作用范围 |
+|--------|----------|----------|
+| 1（最高） | `channels.qqbot.accounts.<accountId>.imStyleReply` | 账号级 |
+| 2 | `channels.qqbot.imStyleReply` | 插件全局 |
+
+支持字段：
+
+- `enabled`: 是否启用短句连发
+- `minLength`: 触发拆分的最小文本长度
+- `maxParts`: 最多拆成多少条
+- `targetPartLength`: 目标单条长度
+- `maxPartLength`: 单条允许的最大长度
+- `delayMs`: 可选的固定发送间隔（毫秒）
+- `delayMinMs`: 发送间隔下限（毫秒）
+- `delayMaxMs`: 发送间隔上限（毫秒）
+
+如果同时配置了 `delayMinMs/delayMaxMs` 和 `delayMs`，优先使用区间延迟。
+
+示例：
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "imStyleReply": {
+        "enabled": true,
+        "minLength": 40,
+        "maxParts": 3,
+        "targetPartLength": 28,
+        "maxPartLength": 64,
+        "delayMinMs": 500,
+        "delayMaxMs": 900
+      },
+      "accounts": {
+        "default": {
+          "appId": "123456",
+          "clientSecret": "xxx"
+        },
+        "huajin": {
+          "appId": "654321",
+          "clientSecret": "yyy",
+          "imStyleReply": {
+            "minLength": 24,
+            "maxParts": 4,
+            "delayMinMs": 350,
+            "delayMaxMs": 800
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+说明：
+
+- 只对纯文本被动回复生效
+- 不会拆分 `<qqimg>` / `<qqvoice>` / `<qqvideo>` / `<qqfile>` / `QQBOT_PAYLOAD`
+- 代码块、列表、标题、引用等明显格式化内容不会启用该拆分
+
 通过 CLI 添加第二个机器人（如果框架支持 `--account` 参数）：
 
 ```bash

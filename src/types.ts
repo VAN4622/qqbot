@@ -26,6 +26,8 @@ export interface ResolvedQQBotAccount {
   imageServerBaseUrl?: string;
   /** 是否支持 markdown 消息（默认 true） */
   markdownSupport: boolean;
+  /** 生效后的 IM 风格文本回复配置 */
+  imStyleReply?: QQBotIMStyleReplyConfig;
   config: QQBotAccountConfig;
 }
 
@@ -63,6 +65,20 @@ export interface QQBotAccountConfig {
   stt?: QQBotSTTConfig;
   /** 账号级 TTS 配置，优先级高于 channels.qqbot.tts */
   tts?: QQBotTTSConfig;
+  /** IM 风格短句连发配置；账号级优先于 channels.qqbot.imStyleReply */
+  imStyleReply?: QQBotIMStyleReplyConfig;
+}
+
+export interface QQBotIMStyleReplyConfig {
+  enabled?: boolean;
+  minLength?: number;
+  maxParts?: number;
+  targetPartLength?: number;
+  maxPartLength?: number;
+  /** 固定延迟，向后兼容；若配置 delayMinMs/delayMaxMs，则后者优先 */
+  delayMs?: number;
+  delayMinMs?: number;
+  delayMaxMs?: number;
 }
 
 export interface QQBotSTTConfig {

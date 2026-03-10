@@ -314,6 +314,70 @@ Example:
 - `bot2` inherits the top-level `stt` and overrides its own `tts.voice`
 - If an account does not define `stt/tts`, it falls back to the global plugin config
 
+### IM-Style Short Reply Configuration
+
+QQBot can split longer plain-text passive replies into 2-3 shorter back-to-back messages for a more natural IM feel. Priority is:
+
+| Priority | Config path | Scope |
+|----------|-------------|-------|
+| 1 (highest) | `channels.qqbot.accounts.<accountId>.imStyleReply` | Account-level |
+| 2 | `channels.qqbot.imStyleReply` | Plugin-global |
+
+Supported fields:
+
+- `enabled`: enable or disable IM-style splitting
+- `minLength`: minimum text length before splitting kicks in
+- `maxParts`: maximum number of short messages
+- `targetPartLength`: preferred length per message
+- `maxPartLength`: hard limit per message before forced splitting
+- `delayMs`: optional fixed delay between messages in milliseconds
+- `delayMinMs`: minimum delay between messages in milliseconds
+- `delayMaxMs`: maximum delay between messages in milliseconds
+
+If both `delayMinMs/delayMaxMs` and `delayMs` are provided, the range takes precedence.
+
+Example:
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "imStyleReply": {
+        "enabled": true,
+        "minLength": 40,
+        "maxParts": 3,
+        "targetPartLength": 28,
+        "maxPartLength": 64,
+        "delayMinMs": 500,
+        "delayMaxMs": 900
+      },
+      "accounts": {
+        "default": {
+          "appId": "123456",
+          "clientSecret": "xxx"
+        },
+        "huajin": {
+          "appId": "654321",
+          "clientSecret": "yyy",
+          "imStyleReply": {
+            "minLength": 24,
+            "maxParts": 4,
+            "delayMinMs": 350,
+            "delayMaxMs": 800
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Notes:
+
+- Only applies to passive plain-text replies
+- Does not split `<qqimg>` / `<qqvoice>` / `<qqvideo>` / `<qqfile>` / `QQBOT_PAYLOAD`
+- Code blocks, lists, headings, and blockquotes are left unsplit
+
 Add a second bot via CLI (if the framework supports the `--account` parameter):
 
 ```bash
