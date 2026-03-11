@@ -8,7 +8,7 @@ import {
 
 import type { ResolvedQQBotAccount } from "./types.js";
 import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount, applyQQBotAccountConfig, resolveDefaultQQBotAccountId } from "./config.js";
-import { sendText, sendMedia } from "./outbound.js";
+import { sendText, sendMedia, sendQQBotAction } from "./outbound.js";
 import { startGateway } from "./gateway.js";
 import { qqbotOnboardingAdapter } from "./onboarding.js";
 import { getQQBotRuntime } from "./runtime.js";
@@ -45,6 +45,185 @@ function chunkText(text: string, limit: number): string[] {
   }
   
   return chunks;
+}
+
+function readParamString(
+  params: Record<string, unknown>,
+  key: string,
+  opts: { required?: boolean; trim?: boolean; allowEmpty?: boolean } = {},
+): string | undefined {
+  const value = params[key];
+  if (typeof value !== "string") {
+    if (opts.required) {
+      throw new Error(`${key} is required`);
+    }
+    return undefined;
+  }
+
+  const result = opts.trim === false ? value : value.trim();
+  if (!opts.allowEmpty && !result) {
+    if (opts.required) {
+      throw new Error(`${key} is required`);
+    }
+    return undefined;
+  }
+
+  return result;
+}
+
+function readOptionalStringStrict(
+  params: Record<string, unknown>,
+  key: string,
+  opts: { trim?: boolean; allowEmpty?: boolean } = {},
+): string | undefined {
+  if (!(key in params)) {
+    return undefined;
+  }
+  if (typeof params[key] !== "string") {
+    throw new Error(`${key} must be a string`);
+  }
+  return readParamString(params, key, { allowEmpty: opts.allowEmpty, trim: opts.trim });
+}
+
+function normalizeQQBotTarget(target: string): string | undefined {
+  const id = target.replace(/^qqbot:/i, "");
+
+  if (id.startsWith("c2c:") || id.startsWith("group:") || id.startsWith("channel:")) {
+    return `qqbot:${id}`;
+  }
+
+  const openIdHexPattern = /^[0-9a-fA-F]{32}$/;
+  if (openIdHexPattern.test(id)) {
+    return `qqbot:c2c:${id}`;
+  }
+
+  const openIdUuidPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+  if (openIdUuidPattern.test(id)) {
+    return `qqbot:c2c:${id}`;
+  }
+
+  return undefined;
+}
+
+type QQBotValidatedSendParams = {
+  to: string;
+  message?: string;
+  media?: string;
+  asVoice: boolean;
+  replyToId?: string;
+  accountId?: string;
+};
+
+function readOptionalBooleanStrict(params: Record<string, unknown>, key: string): boolean | undefined {
+  if (!(key in params)) {
+    return undefined;
+  }
+  if (typeof params[key] !== "boolean") {
+    throw new Error(`${key} must be a boolean`);
+  }
+  return params[key] as boolean;
+}
+
+function assertNoUnknownSendParams(params: Record<string, unknown>) {
+  const allowedKeys = new Set([
+    "action",
+    "to",
+    "target",
+    "channel",
+    "accountId",
+    "threadId",
+    "message",
+    "caption",
+    "media",
+    "path",
+    "filePath",
+    "asVoice",
+    "replyTo",
+  ]);
+
+  const unknownKeys = Object.keys(params).filter((key) => !allowedKeys.has(key) && !key.startsWith("__"));
+  if (unknownKeys.length > 0) {
+    throw new Error(`Unsupported QQBot send parameter(s): ${unknownKeys.join(", ")}`);
+  }
+}
+
+function pickOneStringAlias(
+  params: Record<string, unknown>,
+  keys: string[],
+  label: string,
+  opts: { allowEmpty?: boolean; trim?: boolean; strict?: boolean } = {},
+): string | undefined {
+  const present = keys
+    .filter((key) => key in params)
+    .map((key) => ({
+      key,
+      value: opts.strict === false
+        ? readParamString(params, key, { allowEmpty: true, trim: opts.trim })
+        : readOptionalStringStrict(params, key, { allowEmpty: true, trim: opts.trim }),
+    }));
+
+  const concrete = present.filter((entry) => typeof entry.value === "string");
+  const nonEmpty = concrete.filter((entry) => opts.allowEmpty || entry.value);
+
+  if (nonEmpty.length <= 1) {
+    return nonEmpty[0]?.value;
+  }
+
+  const distinct = new Set(nonEmpty.map((entry) => entry.value));
+  if (distinct.size > 1) {
+    throw new Error(`${label} aliases conflict; use only one of ${keys.join(", ")}`);
+  }
+
+  return nonEmpty[0]?.value;
+}
+
+function validateQQBotSendParams(params: Record<string, unknown>, fallbackAccountId?: string | null): QQBotValidatedSendParams {
+  assertNoUnknownSendParams(params);
+
+  const rawTo = pickOneStringAlias(params, ["to", "target"], "target") ?? "";
+  if (!rawTo) {
+    throw new Error("to is required");
+  }
+  const to = normalizeQQBotTarget(rawTo);
+  if (!to) {
+    throw new Error("to must be a valid QQBot target such as qqbot:c2c:OPENID or qqbot:group:GROUPID");
+  }
+
+  const channel = readOptionalStringStrict(params, "channel");
+  if (channel && channel.trim().toLowerCase() !== "qqbot") {
+    throw new Error(`channel must be qqbot when provided (received ${channel})`);
+  }
+
+  const message = pickOneStringAlias(params, ["message", "caption"], "message", { allowEmpty: true });
+  const media = pickOneStringAlias(params, ["media", "path", "filePath"], "media", {
+    allowEmpty: true,
+    trim: false,
+    strict: false,
+  });
+  const asVoice = readOptionalBooleanStrict(params, "asVoice") ?? false;
+  const replyToId = readOptionalStringStrict(params, "replyTo");
+  const explicitAccountId = readOptionalStringStrict(params, "accountId");
+
+  if (!message && !media) {
+    throw new Error("QQBot send requires either message text or media");
+  }
+
+  if (!media && !message?.trim()) {
+    throw new Error("QQBot text send requires a non-empty message");
+  }
+
+  if (asVoice && !media && !message?.trim()) {
+    throw new Error("QQBot voice send requires message text when media is omitted");
+  }
+
+  return {
+    to,
+    ...(message !== undefined ? { message } : {}),
+    ...(media !== undefined ? { media } : {}),
+    asVoice,
+    ...(replyToId ? { replyToId } : {}),
+    ...((explicitAccountId ?? fallbackAccountId ?? undefined) ? { accountId: (explicitAccountId ?? fallbackAccountId)! } : {}),
+  };
 }
 
 export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
@@ -179,31 +358,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
      * - channel:channelid -> 频道
      * - 纯 openid（32位十六进制）-> 私聊
      */
-    normalizeTarget: (target: string): string | undefined => {
-      // 去掉 qqbot: 前缀（如果有）
-      const id = target.replace(/^qqbot:/i, "");
-      
-      // 检查是否是已知格式
-      if (id.startsWith("c2c:") || id.startsWith("group:") || id.startsWith("channel:")) {
-        return `qqbot:${id}`;
-      }
-      
-      // 检查是否是纯 openid（32位十六进制，不带连字符）
-      // QQ Bot OpenID 格式类似: 207A5B8339D01F6582911C014668B77B
-      const openIdHexPattern = /^[0-9a-fA-F]{32}$/;
-      if (openIdHexPattern.test(id)) {
-        return `qqbot:c2c:${id}`;
-      }
-
-      // 检查是否是 UUID 格式的 openid（带连字符）
-      const openIdUuidPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-      if (openIdUuidPattern.test(id)) {
-        return `qqbot:c2c:${id}`;
-      }
-      
-      // 不认识的格式，返回 undefined
-      return undefined;
-    },
+    normalizeTarget: ((target: string): string | undefined => normalizeQQBotTarget(target)) as any,
     /**
      * 目标解析器配置
      * 用于判断一个目标 ID 是否看起来像 QQ Bot 的格式
@@ -238,6 +393,87 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         return openIdPattern.test(id);
       },
       hint: "QQ Bot 目标格式: qqbot:c2c:openid (私聊) 或 qqbot:group:groupid (群聊)",
+    },
+  },
+  agentPrompt: {
+    messageToolHints: () => [
+      "- On QQBot, send media with the `message` tool using `action=send`, `media`, and optional `message` text.",
+      "- For QQ voice replies generated from text, use `message` with `action=send`, `asVoice=true`, and put the spoken content in `message`.",
+      "- Do not use the `message` tool for reminders on QQBot. Use the dedicated `qqbot_schedule_reminder`, `qqbot_list_reminders`, and `qqbot_remove_reminder` tools instead.",
+      "- Do not call the generic `tts` tool directly on QQBot; generated audio will not be auto-delivered. Use the QQBot `message` tool with `asVoice=true` instead.",
+      "- Never emit legacy inline media markup or raw protocol payload text; QQBot only supports the real message tool.",
+    ],
+  },
+  actions: {
+    listActions: () => ["send", "sendMessage"],
+    supportsAction: ({ action }: { action: string }) =>
+      action === "send"
+      || action === "sendMessage",
+    extractToolSend: ({ args }: { args: Record<string, unknown> }) => {
+      const action = typeof args.action === "string" ? args.action.trim() : "";
+      if (action !== "send" && action !== "sendMessage") {
+        return null;
+      }
+
+      try {
+        const validated = validateQQBotSendParams(args);
+        const threadIdRaw = typeof args.threadId === "string"
+          ? args.threadId.trim()
+          : typeof args.threadId === "number"
+            ? String(args.threadId)
+            : "";
+
+        return {
+          to: validated.to,
+          ...(validated.accountId ? { accountId: validated.accountId } : {}),
+          ...(threadIdRaw ? { threadId: threadIdRaw } : {}),
+        };
+      } catch {
+        return null;
+      }
+    },
+    handleAction: async (ctx: {
+      action: string;
+      cfg: OpenClawConfig;
+      params: Record<string, unknown>;
+      accountId?: string | null;
+    }) => {
+      if (ctx.action !== "send" && ctx.action !== "sendMessage") {
+        throw new Error(`Unsupported QQBot action: ${ctx.action}`);
+      }
+
+      const validated = validateQQBotSendParams(ctx.params, ctx.accountId);
+      const account = resolveQQBotAccount(ctx.cfg, ctx.accountId);
+      const result = await sendQQBotAction({
+        to: validated.to,
+        account,
+        cfg: ctx.cfg as Record<string, unknown>,
+        message: validated.message,
+        media: validated.media,
+        asVoice: validated.asVoice,
+        replyToId: validated.replyToId,
+        accountId: validated.accountId ?? ctx.accountId,
+      });
+
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      const summary = result.messageId
+        ? `Sent QQBot message to ${validated.to} (messageId: ${result.messageId}).`
+        : `Sent QQBot message to ${validated.to}.`;
+
+      return {
+        content: [{ type: "text", text: summary }],
+        details: {
+          status: "success",
+          channel: "qqbot",
+          action: "send",
+          to: validated.to,
+          messageId: result.messageId ?? null,
+          timestamp: result.timestamp ?? null,
+        },
+      };
     },
   },
   outbound: {

@@ -4,7 +4,6 @@
 
 import * as path from "path";
 import type { QQBotIMStyleReplyConfig, ResolvedQQBotAccount } from "./types.js";
-import { decodeCronPayload } from "./utils/payload.js";
 import {
   getAccessToken, 
   sendC2CMessage, 
@@ -21,10 +20,9 @@ import {
   sendC2CFileMessage,
   sendGroupFileMessage,
 } from "./api.js";
-import { isAudioFile, audioFileToSilkBase64, waitForFile } from "./utils/audio-convert.js";
-import { normalizeMediaTags } from "./utils/media-tags.js";
+import { isAudioFile, audioFileToSilkBase64, waitForFile, resolveTTSConfig, textToSilk } from "./utils/audio-convert.js";
 import { checkFileSize, readFileAsync, fileExistsAsync, isLargeFile, formatFileSize } from "./utils/file-utils.js";
-import { isLocalPath as isLocalFilePath, normalizePath, sanitizeFileName } from "./utils/platform.js";
+import { getQQBotDataDir, isLocalPath as isLocalFilePath, normalizePath, sanitizeFileName } from "./utils/platform.js";
 
 // ============ 消息回复限流器 ============
 // 同一 message_id 1小时内最多回复 5 次，超过 1 小时无法被动回复（需改为主动消息）
@@ -58,8 +56,6 @@ function getImStyleDelayMs(delayMinMs: number, delayMaxMs: number, text: string)
 
 function containsStructuredReplyProtocol(text: string): boolean {
   return (
-    /<(qqimg|qqvoice|qqvideo|qqfile)>/i.test(text) ||
-    text.includes("QQBOT_PAYLOAD:") ||
     text.includes("```") ||
     /(^|\n)\s*(#{1,6}\s|[-*]\s|\d+\.\s|>\s)/.test(text)
   );
@@ -422,7 +418,7 @@ function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: strin
  * 注意：
  * 1. 主动消息（无 replyToId）必须有消息内容，不支持流式发送
  * 2. 当被动回复不可用（超期或超过次数）时，自动降级为主动消息
- * 3. 支持 <qqimg>路径</qqimg> 或 <qqimg>路径</img> 格式发送图片
+ * 3. 媒体发送请使用 `sendQQBotAction()` 或独立媒体发送函数
  */
 export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
   const { to, account } = ctx;
@@ -458,343 +454,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
     }
   }
 
-  // ============ 媒体标签检测与处理 ============
-  // 支持四种标签:
-  //   <qqimg>路径</qqimg> 或 <qqimg>路径</img>  — 图片
-  //   <qqvoice>路径</qqvoice>                   — 语音
-  //   <qqvideo>路径或URL</qqvideo>                — 视频
-  //   <qqfile>路径</qqfile>                     — 文件
-  
-  // 预处理：纠正小模型常见的标签拼写错误和格式问题
-  text = normalizeMediaTags(text);
-  
-  const mediaTagRegex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
-  const mediaTagMatches = text.match(mediaTagRegex);
-  
-  if (mediaTagMatches && mediaTagMatches.length > 0) {
-    console.log(`[qqbot] sendText: Detected ${mediaTagMatches.length} media tag(s), processing...`);
-    
-    // 构建发送队列：根据内容在原文中的实际位置顺序发送
-    const sendQueue: Array<{ type: "text" | "image" | "voice" | "video" | "file"; content: string }> = [];
-    
-    let lastIndex = 0;
-    const mediaTagRegexWithIndex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
-    let match;
-    
-    while ((match = mediaTagRegexWithIndex.exec(text)) !== null) {
-      // 添加标签前的文本
-      const textBefore = text.slice(lastIndex, match.index).replace(/\n{3,}/g, "\n\n").trim();
-      if (textBefore) {
-        sendQueue.push({ type: "text", content: textBefore });
-      }
-      
-      const tagName = match[1]!.toLowerCase(); // "qqimg" or "qqvoice" or "qqfile"
-      
-      // 剥离 MEDIA: 前缀（框架可能注入），展开 ~ 路径
-      let mediaPath = match[2]?.trim() ?? "";
-      if (mediaPath.startsWith("MEDIA:")) {
-        mediaPath = mediaPath.slice("MEDIA:".length);
-      }
-      mediaPath = normalizePath(mediaPath);
-
-      // 处理可能被模型转义的路径
-      // 1. 双反斜杠 -> 单反斜杠（Markdown 转义）
-      mediaPath = mediaPath.replace(/\\\\/g, "\\");
-
-      // 2. 八进制转义序列 + UTF-8 双重编码修复
-      try {
-        const hasOctal = /\\[0-7]{1,3}/.test(mediaPath);
-        const hasNonASCII = /[\u0080-\u00FF]/.test(mediaPath);
-
-        if (hasOctal || hasNonASCII) {
-          console.log(`[qqbot] sendText: Decoding path with mixed encoding: ${mediaPath}`);
-
-          // Step 1: 将八进制转义转换为字节
-          let decoded = mediaPath.replace(/\\([0-7]{1,3})/g, (_: string, octal: string) => {
-            return String.fromCharCode(parseInt(octal, 8));
-          });
-
-          // Step 2: 提取所有字节（包括 Latin-1 字符）
-          const bytes: number[] = [];
-          for (let i = 0; i < decoded.length; i++) {
-            const code = decoded.charCodeAt(i);
-            if (code <= 0xFF) {
-              bytes.push(code);
-            } else {
-              const charBytes = Buffer.from(decoded[i], 'utf8');
-              bytes.push(...charBytes);
-            }
-          }
-
-          // Step 3: 尝试按 UTF-8 解码
-          const buffer = Buffer.from(bytes);
-          const utf8Decoded = buffer.toString('utf8');
-
-          if (!utf8Decoded.includes('\uFFFD') || utf8Decoded.length < decoded.length) {
-            mediaPath = utf8Decoded;
-            console.log(`[qqbot] sendText: Successfully decoded path: ${mediaPath}`);
-          }
-        }
-      } catch (decodeErr) {
-        console.error(`[qqbot] sendText: Path decode error: ${decodeErr}`);
-      }
-
-      if (mediaPath) {
-        if (tagName === "qqvoice") {
-          sendQueue.push({ type: "voice", content: mediaPath });
-          console.log(`[qqbot] sendText: Found voice path in <qqvoice>: ${mediaPath}`);
-        } else if (tagName === "qqvideo") {
-          sendQueue.push({ type: "video", content: mediaPath });
-          console.log(`[qqbot] sendText: Found video URL in <qqvideo>: ${mediaPath}`);
-        } else if (tagName === "qqfile") {
-          sendQueue.push({ type: "file", content: mediaPath });
-          console.log(`[qqbot] sendText: Found file path in <qqfile>: ${mediaPath}`);
-        } else {
-          sendQueue.push({ type: "image", content: mediaPath });
-          console.log(`[qqbot] sendText: Found image path in <qqimg>: ${mediaPath}`);
-        }
-      }
-      
-      lastIndex = match.index + match[0].length;
-    }
-    
-    // 添加最后一个标签后的文本
-    const textAfter = text.slice(lastIndex).replace(/\n{3,}/g, "\n\n").trim();
-    if (textAfter) {
-      sendQueue.push({ type: "text", content: textAfter });
-    }
-    
-    console.log(`[qqbot] sendText: Send queue: ${sendQueue.map(item => item.type).join(" -> ")}`);
-    
-    // 按顺序发送
-    if (!account.appId || !account.clientSecret) {
-      return { channel: "qqbot", error: "QQBot not configured (missing appId or clientSecret)" };
-    }
-    
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
-    const target = parseTarget(to);
-    let lastResult: OutboundResult = { channel: "qqbot" };
-    
-    for (const item of sendQueue) {
-      try {
-        if (item.type === "text") {
-          // 发送文本
-          lastResult = await sendPlainTextMessage(accessToken, target, item.content, replyToId);
-          console.log(`[qqbot] sendText: Sent text part: ${item.content.slice(0, 30)}...`);
-        } else if (item.type === "image") {
-          // 发送图片
-          const imagePath = item.content;
-          const isHttpUrl = imagePath.startsWith("http://") || imagePath.startsWith("https://");
-          
-          let imageUrl = imagePath;
-          
-          // 如果是本地文件路径，读取并转换为 Base64
-          if (!isHttpUrl && !imagePath.startsWith("data:")) {
-            if (!(await fileExistsAsync(imagePath))) {
-              console.error(`[qqbot] sendText: Image file not found: ${imagePath}`);
-              continue;
-            }
-            // 文件大小校验
-            const sizeCheck = checkFileSize(imagePath);
-            if (!sizeCheck.ok) {
-              console.error(`[qqbot] sendText: ${sizeCheck.error}`);
-              continue;
-            }
-            const fileBuffer = await readFileAsync(imagePath);
-            const ext = path.extname(imagePath).toLowerCase();
-            const mimeTypes: Record<string, string> = {
-              ".jpg": "image/jpeg",
-              ".jpeg": "image/jpeg",
-              ".png": "image/png",
-              ".gif": "image/gif",
-              ".webp": "image/webp",
-              ".bmp": "image/bmp",
-            };
-            const mimeType = mimeTypes[ext] ?? "image/png";
-            imageUrl = `data:${mimeType};base64,${fileBuffer.toString("base64")}`;
-            console.log(`[qqbot] sendText: Converted local image to Base64 (size: ${formatFileSize(fileBuffer.length)})`);
-          }
-          
-          // 发送图片
-          if (target.type === "c2c") {
-            const result = await sendC2CImageMessage(accessToken, target.id, imageUrl, replyToId ?? undefined);
-            lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-          } else if (target.type === "group") {
-            const result = await sendGroupImageMessage(accessToken, target.id, imageUrl, replyToId ?? undefined);
-            lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-          } else if (isHttpUrl) {
-            // 频道使用 Markdown 格式（仅支持公网 URL）
-            const result = await sendChannelMessage(accessToken, target.id, `![](${imagePath})`, replyToId ?? undefined);
-            lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-          }
-          console.log(`[qqbot] sendText: Sent image via <qqimg> tag: ${imagePath.slice(0, 60)}...`);
-        } else if (item.type === "voice") {
-          // 发送语音文件
-          const voicePath = item.content;
-
-          // 等待文件就绪（TTS 工具异步生成，文件可能还没写完）
-          const fileSize = await waitForFile(voicePath);
-          if (fileSize === 0) {
-            console.error(`[qqbot] sendText: Voice file not ready after waiting: ${voicePath}`);
-            // 发送友好提示给用户
-            try {
-              if (target.type === "c2c") {
-                await sendC2CMessage(accessToken, target.id, "语音生成失败，请稍后重试", replyToId ?? undefined);
-              } else if (target.type === "group") {
-                await sendGroupMessage(accessToken, target.id, "语音生成失败，请稍后重试", replyToId ?? undefined);
-              }
-            } catch {}
-            continue;
-          }
-
-          // 转换为 SILK 格式（QQ Bot API 语音只支持 SILK）
-          const silkBase64 = await audioFileToSilkBase64(voicePath);
-          if (!silkBase64) {
-            const ext = path.extname(voicePath).toLowerCase();
-            console.error(`[qqbot] sendText: Voice conversion to SILK failed: ${ext} (${fileSize} bytes)`);
-            try {
-              if (target.type === "c2c") {
-                await sendC2CMessage(accessToken, target.id, "语音格式转换失败，请稍后重试", replyToId ?? undefined);
-              } else if (target.type === "group") {
-                await sendGroupMessage(accessToken, target.id, "语音格式转换失败，请稍后重试", replyToId ?? undefined);
-              }
-            } catch {}
-            continue;
-          }
-          console.log(`[qqbot] sendText: Voice converted to SILK (${fileSize} bytes)`);
-
-          if (target.type === "c2c") {
-            const result = await sendC2CVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-            lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-          } else if (target.type === "group") {
-            const result = await sendGroupVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-            lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-          } else {
-            const result = await sendChannelMessage(accessToken, target.id, `[语音消息暂不支持频道发送]`, replyToId ?? undefined);
-            lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-          }
-          console.log(`[qqbot] sendText: Sent voice via <qqvoice> tag: ${voicePath.slice(0, 60)}...`);
-        } else if (item.type === "video") {
-          // 发送视频（支持公网 URL 和本地文件）
-          const videoPath = item.content;
-          const isHttpUrl = videoPath.startsWith("http://") || videoPath.startsWith("https://");
-
-          if (isHttpUrl) {
-            // 公网 URL
-            if (target.type === "c2c") {
-              const result = await sendC2CVideoMessage(accessToken, target.id, videoPath, undefined, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupVideoMessage(accessToken, target.id, videoPath, undefined, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            }
-          } else {
-            // 本地文件：读取为 Base64
-            if (!(await fileExistsAsync(videoPath))) {
-              console.error(`[qqbot] sendText: Video file not found: ${videoPath}`);
-              continue;
-            }
-            const videoSizeCheck = checkFileSize(videoPath);
-            if (!videoSizeCheck.ok) {
-              console.error(`[qqbot] sendText: ${videoSizeCheck.error}`);
-              continue;
-            }
-            // 大文件进度提示
-            if (isLargeFile(videoSizeCheck.size)) {
-              try {
-                const hint = `⏳ 正在上传视频 (${formatFileSize(videoSizeCheck.size)})...`;
-                if (target.type === "c2c") {
-                  await sendC2CMessage(accessToken, target.id, hint, replyToId ?? undefined);
-                } else if (target.type === "group") {
-                  await sendGroupMessage(accessToken, target.id, hint, replyToId ?? undefined);
-                }
-              } catch {}
-            }
-            const fileBuffer = await readFileAsync(videoPath);
-            const videoBase64 = fileBuffer.toString("base64");
-            console.log(`[qqbot] sendText: Read local video (${formatFileSize(fileBuffer.length)}): ${videoPath}`);
-
-            if (target.type === "c2c") {
-              const result = await sendC2CVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            }
-          }
-          console.log(`[qqbot] sendText: Sent video via <qqvideo> tag: ${videoPath.slice(0, 60)}...`);
-        } else if (item.type === "file") {
-          // 发送文件
-          const filePath = item.content;
-          const isHttpUrl = filePath.startsWith("http://") || filePath.startsWith("https://");
-          const fileName = sanitizeFileName(path.basename(filePath));
-
-          if (isHttpUrl) {
-            // 公网 URL：直接通过 url 参数上传
-            if (target.type === "c2c") {
-              const result = await sendC2CFileMessage(accessToken, target.id, undefined, filePath, replyToId ?? undefined, fileName);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupFileMessage(accessToken, target.id, undefined, filePath, replyToId ?? undefined, fileName);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            }
-          } else {
-            // 本地文件：读取转 Base64 上传
-            if (!(await fileExistsAsync(filePath))) {
-              console.error(`[qqbot] sendText: File not found: ${filePath}`);
-              continue;
-            }
-            const fileSizeCheck = checkFileSize(filePath);
-            if (!fileSizeCheck.ok) {
-              console.error(`[qqbot] sendText: ${fileSizeCheck.error}`);
-              continue;
-            }
-            // 大文件进度提示
-            if (isLargeFile(fileSizeCheck.size)) {
-              try {
-                const hint = `⏳ 正在上传文件 ${fileName} (${formatFileSize(fileSizeCheck.size)})...`;
-                if (target.type === "c2c") {
-                  await sendC2CMessage(accessToken, target.id, hint, replyToId ?? undefined);
-                } else if (target.type === "group") {
-                  await sendGroupMessage(accessToken, target.id, hint, replyToId ?? undefined);
-                }
-              } catch {}
-            }
-            const fileBuffer = await readFileAsync(filePath);
-            const fileBase64 = fileBuffer.toString("base64");
-            console.log(`[qqbot] sendText: Read local file (${formatFileSize(fileBuffer.length)}): ${filePath}`);
-
-            if (target.type === "c2c") {
-              const result = await sendC2CFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-            }
-          }
-          console.log(`[qqbot] sendText: Sent file via <qqfile> tag: ${filePath.slice(0, 60)}...`);
-        }
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        console.error(`[qqbot] sendText: Failed to send ${item.type}: ${errMsg}`);
-        // 继续发送队列中的其他内容
-      }
-    }
-    
-    return lastResult;
-  }
+  text = text ?? "";
 
   // ============ 主动消息校验（参考 Telegram 机制） ============
   // 如果是主动消息（无 replyToId 或降级后），必须有消息内容
@@ -1378,80 +1038,121 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
   }
 }
 
-/**
- * 发送 Cron 触发的消息
- * 
- * 当 OpenClaw cron 任务触发时，消息内容可能是：
- * 1. QQBOT_CRON:{base64} 格式的结构化载荷 - 解码后根据 targetType 和 targetAddress 发送
- * 2. 普通文本 - 直接发送到指定目标
- * 
- * @param account - 账户配置
- * @param to - 目标地址（作为后备，如果载荷中没有指定）
- * @param message - 消息内容（可能是 QQBOT_CRON: 格式或普通文本）
- * @returns 发送结果
- * 
- * @example
- * ```typescript
- * // 处理结构化载荷
- * const result = await sendCronMessage(
- *   account,
- *   "user_openid",  // 后备地址
- *   "QQBOT_CRON:eyJ0eXBlIjoiY3Jvbl9yZW1pbmRlciIs..."  // Base64 编码的载荷
- * );
- * 
- * // 处理普通文本
- * const result = await sendCronMessage(
- *   account,
- *   "user_openid",
- *   "这是一条普通的提醒消息"
- * );
- * ```
- */
-export async function sendCronMessage(
-  account: ResolvedQQBotAccount,
-  to: string,
-  message: string
-): Promise<OutboundResult> {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] [qqbot] sendCronMessage: to=${to}, message length=${message.length}`);
-  
-  // 检测是否是 QQBOT_CRON: 格式的结构化载荷
-  const cronResult = decodeCronPayload(message);
-  
-  if (cronResult.isCronPayload) {
-    if (cronResult.error) {
-      console.error(`[${timestamp}] [qqbot] sendCronMessage: cron payload decode error: ${cronResult.error}`);
-      return {
-        channel: "qqbot",
-        error: `Cron 载荷解码失败: ${cronResult.error}`
-      };
-    }
-    
-    if (cronResult.payload) {
-      const payload = cronResult.payload;
-      console.log(`[${timestamp}] [qqbot] sendCronMessage: decoded cron payload, targetType=${payload.targetType}, targetAddress=${payload.targetAddress}, content length=${payload.content.length}`);
-      
-      // 使用载荷中的目标地址和类型发送消息
-      const targetTo = payload.targetType === "group" 
-        ? `group:${payload.targetAddress}` 
-        : payload.targetAddress;
-      
-      console.log(`[${timestamp}] [qqbot] sendCronMessage: sending proactive message to targetTo=${targetTo}`);
-      
-      // 发送提醒内容
-      const result = await sendProactiveMessage(account, targetTo, payload.content);
-      
-      if (result.error) {
-        console.error(`[${timestamp}] [qqbot] sendCronMessage: proactive message failed, error=${result.error}`);
-      } else {
-        console.log(`[${timestamp}] [qqbot] sendCronMessage: proactive message sent successfully`);
-      }
-      
-      return result;
-    }
+function isImageResource(resource: string): boolean {
+  if (resource.startsWith("data:image/")) {
+    return true;
   }
-  
-  // 非结构化载荷，作为普通文本处理
-  console.log(`[${timestamp}] [qqbot] sendCronMessage: plain text message, sending to ${to}`);
-  return await sendProactiveMessage(account, to, message);
+  const clean = resource.split("?")[0]!;
+  const ext = path.extname(clean).toLowerCase();
+  return [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(ext);
+}
+
+function isVideoResource(resource: string): boolean {
+  const clean = resource.split("?")[0]!;
+  const ext = path.extname(clean).toLowerCase();
+  return [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"].includes(ext);
+}
+
+export interface QQBotSendActionContext {
+  to: string;
+  account: ResolvedQQBotAccount;
+  cfg: Record<string, unknown>;
+  message?: string;
+  media?: string;
+  asVoice?: boolean;
+  replyToId?: string | null;
+  accountId?: string | null;
+}
+
+export async function sendQQBotAction(ctx: QQBotSendActionContext): Promise<OutboundResult> {
+  const text = (ctx.message ?? "").trim();
+  const media = typeof ctx.media === "string" ? normalizePath(ctx.media) : "";
+
+  if (!media) {
+    if (ctx.asVoice) {
+      if (!text) {
+        return { channel: "qqbot", error: "QQBot voice send requires message text when media is omitted" };
+      }
+      const ttsCfg = resolveTTSConfig(ctx.cfg, ctx.account.accountId);
+      if (!ttsCfg) {
+        return { channel: "qqbot", error: "QQBot TTS is not configured" };
+      }
+      const ttsDir = getQQBotDataDir("tts");
+      const { silkPath } = await textToSilk(text, ttsCfg, ttsDir);
+      return await sendVoiceFile({
+        to: ctx.to,
+        text: "",
+        mediaUrl: silkPath,
+        accountId: ctx.accountId,
+        replyToId: ctx.replyToId,
+        account: ctx.account,
+      });
+    }
+
+    return await sendText({
+      to: ctx.to,
+      text,
+      accountId: ctx.accountId,
+      replyToId: ctx.replyToId,
+      account: ctx.account,
+    });
+  }
+
+  if (ctx.asVoice) {
+    if (!isLocalFilePath(media)) {
+      return { channel: "qqbot", error: "QQBot voice attachments must use a local audio path" };
+    }
+    return await sendVoiceFile({
+      to: ctx.to,
+      text,
+      mediaUrl: media,
+      accountId: ctx.accountId,
+      replyToId: ctx.replyToId,
+      account: ctx.account,
+    });
+  }
+
+  if (isImageResource(media)) {
+    return await sendMedia({
+      to: ctx.to,
+      text,
+      mediaUrl: media,
+      accountId: ctx.accountId,
+      replyToId: ctx.replyToId,
+      account: ctx.account,
+    });
+  }
+
+  if (isLocalFilePath(media) && isAudioFile(media)) {
+    return await sendVoiceFile({
+      to: ctx.to,
+      text,
+      mediaUrl: media,
+      accountId: ctx.accountId,
+      replyToId: ctx.replyToId,
+      account: ctx.account,
+    });
+  }
+
+  if (isVideoResource(media)) {
+    const isHttpUrl = media.startsWith("http://") || media.startsWith("https://");
+    const fn = isHttpUrl ? sendVideoUrl : sendVideoFile;
+    return await fn({
+      to: ctx.to,
+      text,
+      mediaUrl: media,
+      accountId: ctx.accountId,
+      replyToId: ctx.replyToId,
+      account: ctx.account,
+    });
+  }
+
+  return await sendDocumentFile({
+    to: ctx.to,
+    text,
+    mediaUrl: media,
+    accountId: ctx.accountId,
+    replyToId: ctx.replyToId,
+    account: ctx.account,
+  });
 }

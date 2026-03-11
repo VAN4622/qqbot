@@ -2,6 +2,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 import { qqbotPlugin } from "./src/channel.js";
+import { buildQQBotReminderTools, type QQBotReminderToolContext } from "./src/reminder-tools.js";
 import { setQQBotRuntime } from "./src/runtime.js";
 
 const plugin = {
@@ -10,8 +11,12 @@ const plugin = {
   description: "QQ Bot channel plugin",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
+    const pluginApi = api as OpenClawPluginApi & {
+      registerTool: (tool: unknown, opts?: unknown) => void;
+    };
     setQQBotRuntime(api.runtime);
     api.registerChannel({ plugin: qqbotPlugin });
+    pluginApi.registerTool((ctx: QQBotReminderToolContext) => buildQQBotReminderTools(ctx));
   },
 };
 

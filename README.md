@@ -1,30 +1,23 @@
-# QQ Bot for OpenClaw
+# QQBot for OpenClaw
 
-This repository is a maintained fork of the QQ Bot channel plugin for OpenClaw. It connects the official QQ Bot API to OpenClaw and carries a set of fixes around multi-account support, voice config, prompt hygiene, media flows, and message delivery behavior.
+QQBot is an OpenClaw channel plugin for the official QQ Bot API.
 
-This README documents the behavior of **this fork**, not necessarily the current upstream npm release.
+This repository is a fork of the upstream project. Upstream remains the original source and deserves full credit. This README documents the behavior of this codebase, because its runtime behavior and tool surface no longer match the upstream README.
 
 ## What this fork changes
 
-- supports `channels.qqbot.accounts.default` as the default account
-- supports account-scoped `STT/TTS`
-- removes the old per-message prompt-heavy QQ rule injection
-- trims QQ media / cron skill text to reduce context pollution
-- persists lightweight pending inbound history
-- adds IM-style short split replies with pacing controls
-- hardens `QQBOT_PAYLOAD` handling and avoids leaking internal protocol text to end users
-
-## Typical use cases
-
-- remote-control OpenClaw via QQ direct messages or groups
-- run multiple QQ bots in one OpenClaw instance
-- bind different bots to different agents
-- configure different `STT/TTS` per bot
-- send images, voice, video, and files
+- supports multi-account QQBot routing
+- supports account-scoped `STT`, `TTS`, and IM-style reply settings
+- removes the old prompt-heavy QQ rule injection from normal message bodies
+- stops treating markdown and code blocks as hidden media instructions
+- replaces brittle inline media parsing with explicit tool-based sends
+- replaces QQ-specific reminder payload strings with standalone reminder tools
+- sends text and media through the real `message` tool
+- treats markdown as display text instead of an execution protocol
 
 ## Install
 
-### From your fork or local source
+### Install from source
 
 ```bash
 git clone <your-fork-url>
@@ -32,27 +25,24 @@ cd qqbot
 openclaw plugins install .
 ```
 
-### From a local packed tarball
+### Install from npm
+
+```bash
+openclaw plugins install @van1024/qqbot@latest
+```
+
+### Install from a tarball
 
 ```bash
 npm pack
-openclaw plugins install ./van4622-qqbot-1.5.4-van.1.tgz
+openclaw plugins install ./van1024-qqbot-1.5.5.tgz
 ```
 
-For remote servers, deploying a `.tgz` package is usually the safest path.
+For offline or remote deployment, a `.tgz` package is usually the safest release artifact.
 
-### From a GitHub Release asset
+## Configuration
 
-Download the release asset from your fork, then install it:
-
-```bash
-curl -L -o qqbot.tgz <your-release-asset-url>
-openclaw plugins install ./qqbot.tgz
-```
-
-## Config shape
-
-This fork expects the standard multi-account layout:
+Use the standard multi-account layout under `channels.qqbot.accounts`.
 
 ```json
 {
@@ -60,21 +50,21 @@ This fork expects the standard multi-account layout:
     "qqbot": {
       "enabled": true,
       "stt": {
-        "provider": "siliconflow",
-        "model": "FunAudioLLM/SenseVoiceSmall"
+        "provider": "YOUR_STT_PROVIDER",
+        "model": "YOUR_STT_MODEL"
       },
       "accounts": {
         "default": {
           "enabled": true,
           "allowFrom": ["*"],
-          "appId": "1903058177",
-          "clientSecret": "your-default-secret"
+          "appId": "YOUR_DEFAULT_APP_ID",
+          "clientSecret": "YOUR_DEFAULT_CLIENT_SECRET"
         },
-        "huajin": {
+        "bot_b": {
           "enabled": true,
           "allowFrom": ["*"],
-          "appId": "1903057687",
-          "clientSecret": "your-huajin-secret"
+          "appId": "YOUR_SECONDARY_APP_ID",
+          "clientSecret": "YOUR_SECONDARY_CLIENT_SECRET"
         }
       }
     }
@@ -84,13 +74,13 @@ This fork expects the standard multi-account layout:
 
 Notes:
 
-- `accounts.default` is the default bot account
-- named accounts go under `accounts.<accountId>`
-- top-level `channels.qqbot` is mainly for plugin-wide defaults
+- `accounts.default` is the default QQBot account
+- additional accounts live under `accounts.<accountId>`
+- top-level `channels.qqbot` holds shared defaults
 
-## Binding bots to agents
+## Bindings
 
-Typical routing:
+Route different QQBot accounts to different agents through OpenClaw bindings.
 
 ```json
 {
@@ -103,17 +93,19 @@ Typical routing:
       }
     },
     {
-      "agentId": "huajin",
+      "agentId": "agent-b",
       "match": {
         "channel": "qqbot",
-        "accountId": "huajin"
+        "accountId": "bot_b"
       }
     }
   ]
 }
 ```
 
-## Voice configuration
+The example names here are generic on purpose. They are not special runtime identifiers.
+
+## STT and TTS
 
 ### STT priority
 
@@ -127,37 +119,33 @@ Typical routing:
 2. `channels.qqbot.tts`
 3. `messages.tts`
 
-### Example
+Example:
 
 ```json
 {
   "channels": {
     "qqbot": {
-      "stt": {
-        "provider": "siliconflow",
-        "model": "FunAudioLLM/SenseVoiceSmall"
-      },
       "accounts": {
         "default": {
-          "appId": "1903058177",
-          "clientSecret": "secret-a",
+          "appId": "YOUR_DEFAULT_APP_ID",
+          "clientSecret": "YOUR_DEFAULT_CLIENT_SECRET",
           "tts": {
-            "provider": "siliconflow",
-            "baseUrl": "https://api.siliconflow.cn/v1",
-            "apiKey": "key-a",
-            "model": "FunAudioLLM/CosyVoice2-0.5B",
-            "voice": "FunAudioLLM/CosyVoice2-0.5B:alex"
+            "provider": "YOUR_TTS_PROVIDER",
+            "baseUrl": "YOUR_TTS_BASE_URL",
+            "apiKey": "YOUR_TTS_API_KEY",
+            "model": "YOUR_TTS_MODEL",
+            "voice": "YOUR_DEFAULT_TTS_VOICE"
           }
         },
-        "huajin": {
-          "appId": "1903057687",
-          "clientSecret": "secret-b",
+        "bot_b": {
+          "appId": "YOUR_SECONDARY_APP_ID",
+          "clientSecret": "YOUR_SECONDARY_CLIENT_SECRET",
           "tts": {
-            "provider": "siliconflow",
-            "baseUrl": "https://api.siliconflow.cn/v1",
-            "apiKey": "key-b",
-            "model": "FunAudioLLM/CosyVoice2-0.5B",
-            "voice": "speech:huajin:example"
+            "provider": "YOUR_TTS_PROVIDER",
+            "baseUrl": "YOUR_TTS_BASE_URL",
+            "apiKey": "YOUR_TTS_API_KEY",
+            "model": "YOUR_TTS_MODEL",
+            "voice": "YOUR_SECONDARY_TTS_VOICE"
           }
         }
       }
@@ -166,47 +154,121 @@ Typical routing:
 }
 ```
 
-## Media sending rules
+## Sending messages and media
 
-### Send existing media files directly
+Use the real `message` tool.
 
-- image: `<qqimg>/absolute/path/or/url</qqimg>`
-- voice: `<qqvoice>/absolute/path</qqvoice>`
-- video: `<qqvideo>/absolute/path/or/url</qqvideo>`
-- file: `<qqfile>/absolute/path/or/url</qqfile>`
+Supported actions:
 
-### Use built-in TTS to turn text into a voice message
+- `send`
+- `sendMessage`
 
-Use `QQBOT_PAYLOAD`:
+Supported patterns:
 
-```text
-QQBOT_PAYLOAD:
+- plain text message
+- image, file, video, or local audio path through `media`
+- TTS voice message through `message + asVoice=true`
+- existing local audio file sent as a QQ voice message through `media + asVoice=true`
+
+Examples:
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","message":"Hello from QQBot."}
+```
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","message":"Here is the image.","media":"C:/tmp/pic.png"}
+```
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","message":"I will reply by voice now.","asVoice":true}
+```
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","media":"C:/tmp/reply.mp3","asVoice":true}
+```
+
+Note:
+
+- do not use the generic `tts` tool for QQ delivery
+- QQBot media delivery is expected to go through `message`
+
+## Reminder tools
+
+Use the standalone reminder tools:
+
+- `qqbot_schedule_reminder`
+- `qqbot_list_reminders`
+- `qqbot_remove_reminder`
+
+One-shot reminder:
+
+```json
 {
-  "type": "media",
-  "mediaType": "audio",
-  "source": "file",
-  "path": "This text should be turned into voice and sent."
+  "message": "Remind the user to drink water.",
+  "delayMinutes": 30
 }
 ```
 
-Important:
+Recurring reminder:
 
-- the entire reply must be only this payload
-- `QQBOT_PAYLOAD:` must be on the first line
-- do not add explanation text before or after it
+```json
+{
+  "message": "Remind the user to check in.",
+  "cronExpr": "0 8 * * *",
+  "timezone": "Asia/Shanghai"
+}
+```
 
-See [docs/qqbot-media-guide.md](docs/qqbot-media-guide.md) for the practical media rules.
+By default, reminder tools operate on the current QQ session.
 
-## IM-style short split replies
+Use `reminderTarget` only when managing a different QQ conversation.
+Use `reminderAccountId` when that target belongs to a different QQBot account.
 
-This fork can split longer passive plain-text replies into multiple short messages for a more natural IM feel.
+```json
+{
+  "message": "Remind the user to review this thread.",
+  "delayMinutes": 1,
+  "reminderTarget": "qqbot:c2c:USER_OPENID",
+  "reminderAccountId": "bot_b"
+}
+```
 
-### Priority
+## Cross-agent reminder workflow
+
+If one agent needs to manage reminders for another agent's QQ session:
+
+1. Use the system `sessions_list` tool first.
+2. Resolve the target QQ session.
+3. Pass `reminderTarget` and, if needed, `reminderAccountId`.
+
+If `sessions_list` cannot see other agents' sessions, the host usually needs:
+
+```json
+{
+  "tools": {
+    "profile": "full",
+    "sessions": {
+      "visibility": "all"
+    },
+    "agentToAgent": {
+      "enabled": true,
+      "allow": ["agent-b"]
+    }
+  }
+}
+```
+
+## IM-style replies
+
+This fork can split longer passive plain-text replies into shorter IM-style messages.
+
+Priority:
 
 1. `channels.qqbot.accounts.<accountId>.imStyleReply`
 2. `channels.qqbot.imStyleReply`
 
-### Supported fields
+Supported fields:
 
 - `enabled`
 - `minLength`
@@ -217,18 +279,16 @@ This fork can split longer passive plain-text replies into multiple short messag
 - `delayMinMs`
 - `delayMaxMs`
 
-If both `delayMs` and `delayMinMs/delayMaxMs` are set, the delay range wins.
-
-### Example
+Example:
 
 ```json
 {
   "channels": {
     "qqbot": {
       "accounts": {
-        "huajin": {
-          "appId": "1903057687",
-          "clientSecret": "secret-b",
+        "bot_b": {
+          "appId": "YOUR_SECONDARY_APP_ID",
+          "clientSecret": "YOUR_SECONDARY_CLIENT_SECRET",
           "imStyleReply": {
             "enabled": true,
             "minLength": 18,
@@ -245,59 +305,35 @@ If both `delayMs` and `delayMinMs/delayMaxMs` are set, the delay range wins.
 }
 ```
 
-Notes:
+Structured markdown is left intact.
 
-- only applies to passive plain-text replies
-- does not split `<qqimg>` / `<qqvoice>` / `<qqvideo>` / `<qqfile>` / `QQBOT_PAYLOAD`
-- code blocks, lists, headings, and blockquotes are left unsplit
+## Limitations
 
-## Running locally without a public IP
-
-QQ control still works without a public IP as long as your local machine can make outbound connections to:
-
-- the QQ Bot gateway
-- your model / `STT` / `TTS` providers
-
-That does **not** mean your Control UI is reachable from the public internet. For the dashboard you still need:
-
-- SSH tunneling
-- Tailscale / ZeroTier
-- a reverse proxy / NAT traversal setup
-
-## Known behavior
-
-- `STT` is automatic in the plugin; the model receives the transcript result
-- `TTS` is an active reply path; the model must choose `<qqvoice>` or `QQBOT_PAYLOAD`
-- malformed `QQBOT_PAYLOAD` is logged and suppressed instead of being sent to users
-- passive replies are still subject to platform-side message reply limits
+- reminder delivery is outbound and does not automatically hydrate the original session transcript
+- `qqbot_list_reminders` can report `lastRunAtMs` and `lastRunStatus` only while the underlying job still exists
+- one-shot reminders deleted immediately after execution may no longer appear in later listings
+- QQ platform-side delivery limits still apply
 
 ## Troubleshooting
 
-### Account is configured but receives no messages
-
-Run the gateway in the foreground:
+### Messages are not arriving
 
 ```bash
 openclaw gateway stop
 openclaw gateway run --verbose
 ```
 
-Typical causes:
+Common causes:
 
 - `invalid appid or secret`
 - missing QQ platform permissions
 - the account never reaches `READY`
+- an old package is deployed instead of the latest build of this fork
 
 ### `clientSecret` became `"__OPENCLAW_REDACTED__"`
 
-If the value on disk is literally `"__OPENCLAW_REDACTED__"`, that is not display-only masking. The credential has been overwritten and must be replaced with the real secret manually.
-
-### IM-style config seems ignored
-
-Make sure you deployed the latest packaged build of this fork, not an older `.tgz`.
+If the literal value on disk is `"__OPENCLAW_REDACTED__"`, the credential was overwritten and must be restored manually.
 
 ## License
 
 This fork continues to use the upstream [MIT License](LICENSE).
-
-Keep the original license and copyright notice.

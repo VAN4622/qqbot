@@ -1,32 +1,24 @@
-# QQ Bot for OpenClaw
+# QQBot for OpenClaw
 
-这个仓库是一个自维护 fork，用来把 QQ 官方 Bot API 接进 OpenClaw，并修正上游版本里一些和多账号、语音、上下文注入、发送体验相关的问题。
+QQBot 是一个接入 QQ 官方 Bot API 的 OpenClaw channel 插件。
 
-本文档描述的是**当前这个 fork 的实际行为**，不保证和上游 npm 发布版完全一致。
+这个仓库是上游项目的 fork。上游仍然是原始来源，理应获得完整尊重与署名。之所以单独写这份 README，是因为这套代码的运行行为和工具接口已经和上游文档不再一致。
 
-## 当前 fork 的主要改动
+## 这版的变化
 
-- 默认账号支持标准结构 `channels.qqbot.accounts.default`
-- `STT/TTS` 支持账号级配置，优先级高于插件全局配置
-- 去掉了每轮入站正文里那种大段手搓规则注入
-- 精简了 QQ 媒体与 cron skill，降低上下文污染
-- 增加了待回复历史的轻量持久化
-- 增加了 IM 风格短句连发与随机节奏控制
-- `QQBOT_PAYLOAD` 的格式要求和错误处理更严格，避免把内部协议文本直接发给用户
-
-## 适用场景
-
-这个插件适合：
-
-- 用 QQ 私聊或群聊远程和 OpenClaw 交互
-- 一个 OpenClaw 实例挂多个 QQ 机器人
-- 不同机器人绑定不同 Agent
-- 不同机器人使用不同 STT/TTS 配置
-- 发送图片、语音、视频、文件
+- 支持多 QQBot 账号路由
+- 支持账号级 `STT`、`TTS`、IM 风格回复配置
+- 去掉了源项目里塞进普通消息正文的大段手搓 QQ 规则提示词
+- markdown 和代码块里的内容不再被当成隐式媒体协议执行
+- 富媒体发送不再依赖从普通回复里硬解析内联协议
+- 富媒体发送改成正式工具链路
+- 定时提醒改成独立 reminder 工具，不再依赖 QQ 私有 payload 字符串
+- 文本和媒体统一通过 `message` 工具发送
+- markdown 只负责展示，不再承担执行协议职责
 
 ## 安装
 
-### 方式 1：从你自己的 fork 或本地源码安装
+### 从源码安装
 
 ```bash
 git clone <your-fork-url>
@@ -34,27 +26,24 @@ cd qqbot
 openclaw plugins install .
 ```
 
-### 方式 2：本地打包后安装
+### 从 npm 安装
+
+```bash
+openclaw plugins install @van1024/qqbot@latest
+```
+
+### 从打包产物安装
 
 ```bash
 npm pack
-openclaw plugins install ./van4622-qqbot-1.5.4-van.1.tgz
+openclaw plugins install ./van1024-qqbot-1.5.5.tgz
 ```
 
-如果你是把插件部署到远程服务器，建议用 `.tgz` 包部署。
-
-### 方式 3：从 GitHub Release 安装
-
-先下载你自己 fork 发布的 release 资产，再安装：
-
-```bash
-curl -L -o qqbot.tgz <your-release-asset-url>
-openclaw plugins install ./qqbot.tgz
-```
+如果是离线或远程部署，`.tgz` 通常是最稳妥的发布物。
 
 ## 配置结构
 
-当前 fork 推荐使用标准多账号结构：
+当前推荐使用 `channels.qqbot.accounts` 这一套标准多账号结构。
 
 ```json
 {
@@ -62,21 +51,21 @@ openclaw plugins install ./qqbot.tgz
     "qqbot": {
       "enabled": true,
       "stt": {
-        "provider": "siliconflow",
-        "model": "FunAudioLLM/SenseVoiceSmall"
+        "provider": "YOUR_STT_PROVIDER",
+        "model": "YOUR_STT_MODEL"
       },
       "accounts": {
         "default": {
           "enabled": true,
           "allowFrom": ["*"],
-          "appId": "1903058177",
-          "clientSecret": "your-default-secret"
+          "appId": "YOUR_DEFAULT_APP_ID",
+          "clientSecret": "YOUR_DEFAULT_CLIENT_SECRET"
         },
-        "huajin": {
+        "bot_b": {
           "enabled": true,
           "allowFrom": ["*"],
-          "appId": "1903057687",
-          "clientSecret": "your-huajin-secret"
+          "appId": "YOUR_SECONDARY_APP_ID",
+          "clientSecret": "YOUR_SECONDARY_CLIENT_SECRET"
         }
       }
     }
@@ -86,13 +75,13 @@ openclaw plugins install ./qqbot.tgz
 
 说明：
 
-- `accounts.default` 是默认账号
-- 其他机器人放在 `accounts.<accountId>`
-- 顶层 `channels.qqbot` 主要放插件全局默认配置
+- `accounts.default` 是默认 QQBot 账号
+- 其他账号放在 `accounts.<accountId>`
+- 顶层 `channels.qqbot` 存放共享默认配置
 
-## 多账号绑定 Agent
+## 绑定到 Agent
 
-典型绑定方式：
+可以通过 OpenClaw 的 `bindings` 把不同 QQBot 账号路由到不同 Agent。
 
 ```json
 {
@@ -105,17 +94,19 @@ openclaw plugins install ./qqbot.tgz
       }
     },
     {
-      "agentId": "huajin",
+      "agentId": "agent-b",
       "match": {
         "channel": "qqbot",
-        "accountId": "huajin"
+        "accountId": "bot_b"
       }
     }
   ]
 }
 ```
 
-## 语音配置
+这里使用的是通用示例名，不代表任何特殊运行时含义。
+
+## STT 与 TTS
 
 ### STT 优先级
 
@@ -129,37 +120,33 @@ openclaw plugins install ./qqbot.tgz
 2. `channels.qqbot.tts`
 3. `messages.tts`
 
-### 示例
+示例：
 
 ```json
 {
   "channels": {
     "qqbot": {
-      "stt": {
-        "provider": "siliconflow",
-        "model": "FunAudioLLM/SenseVoiceSmall"
-      },
       "accounts": {
         "default": {
-          "appId": "1903058177",
-          "clientSecret": "secret-a",
+          "appId": "YOUR_DEFAULT_APP_ID",
+          "clientSecret": "YOUR_DEFAULT_CLIENT_SECRET",
           "tts": {
-            "provider": "siliconflow",
-            "baseUrl": "https://api.siliconflow.cn/v1",
-            "apiKey": "key-a",
-            "model": "FunAudioLLM/CosyVoice2-0.5B",
-            "voice": "FunAudioLLM/CosyVoice2-0.5B:alex"
+            "provider": "YOUR_TTS_PROVIDER",
+            "baseUrl": "YOUR_TTS_BASE_URL",
+            "apiKey": "YOUR_TTS_API_KEY",
+            "model": "YOUR_TTS_MODEL",
+            "voice": "YOUR_DEFAULT_TTS_VOICE"
           }
         },
-        "huajin": {
-          "appId": "1903057687",
-          "clientSecret": "secret-b",
+        "bot_b": {
+          "appId": "YOUR_SECONDARY_APP_ID",
+          "clientSecret": "YOUR_SECONDARY_CLIENT_SECRET",
           "tts": {
-            "provider": "siliconflow",
-            "baseUrl": "https://api.siliconflow.cn/v1",
-            "apiKey": "key-b",
-            "model": "FunAudioLLM/CosyVoice2-0.5B",
-            "voice": "speech:huajin:example"
+            "provider": "YOUR_TTS_PROVIDER",
+            "baseUrl": "YOUR_TTS_BASE_URL",
+            "apiKey": "YOUR_TTS_API_KEY",
+            "model": "YOUR_TTS_MODEL",
+            "voice": "YOUR_SECONDARY_TTS_VOICE"
           }
         }
       }
@@ -168,47 +155,127 @@ openclaw plugins install ./qqbot.tgz
 }
 ```
 
-## 富媒体发送规则
+## 发送消息与媒体
 
-### 直接发送已有媒体
+请使用正式 `message` 工具。
 
-- 图片：`<qqimg>/absolute/path/or/url</qqimg>`
-- 语音：`<qqvoice>/absolute/path</qqvoice>`
-- 视频：`<qqvideo>/absolute/path/or/url</qqvideo>`
-- 文件：`<qqfile>/absolute/path/or/url</qqfile>`
+可用 action：
 
-### 用插件内建 TTS 直接把文本变成语音
+- `send`
+- `sendMessage`
 
-使用 `QQBOT_PAYLOAD`：
+支持的模式：
 
-```text
-QQBOT_PAYLOAD:
-{
-  "type": "media",
-  "mediaType": "audio",
-  "source": "file",
-  "path": "这是一段需要转成语音发送的文本。"
-}
+- 纯文本消息
+- 通过 `media` 发送图片、文件、视频或本地音频
+- 通过 `message + asVoice=true` 发送 TTS 语音
+- 通过 `media + asVoice=true` 把已有本地音频文件按 QQ 语音消息发送
+
+示例：
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","message":"你好，这是一条 QQBot 消息。"}
+```
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","message":"这是图片。","media":"C:/tmp/pic.png"}
+```
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","message":"我现在用语音回复你。","asVoice":true}
+```
+
+```json
+{"action":"send","to":"qqbot:c2c:OPENID","media":"C:/tmp/reply.mp3","asVoice":true}
 ```
 
 注意：
 
-- 整条回复必须只包含这一段 payload
-- `QQBOT_PAYLOAD:` 必须在第一行
-- 前后都不要加解释文字
+- 不要在 QQBot 场景直接调用通用 `tts`
+- QQBot 媒体发送应统一通过 `message` 完成
 
-详细规则见：[docs/qqbot-media-guide.md](docs/qqbot-media-guide.md)
+## Reminder 工具
 
-## IM 风格短句连发
+请使用独立 reminder 工具：
 
-这个 fork 支持把较长的纯文本被动回复拆成多条短句发送。
+- `qqbot_schedule_reminder`
+- `qqbot_list_reminders`
+- `qqbot_remove_reminder`
 
-### 优先级
+一次性提醒：
+
+```json
+{
+  "message": "30 分钟后提醒用户喝水。",
+  "delayMinutes": 30
+}
+```
+
+周期提醒：
+
+```json
+{
+  "message": "每天提醒用户打卡。",
+  "cronExpr": "0 8 * * *",
+  "timezone": "Asia/Shanghai"
+}
+```
+
+默认情况下，这些工具直接作用于当前 QQ 会话。
+
+只有在管理其他 QQ 会话时，才传：
+
+- `reminderTarget`
+
+如果目标属于另一个 QQBot 账号，再传：
+
+- `reminderAccountId`
+
+```json
+{
+  "message": "1 分钟后提醒用户回看这个会话。",
+  "delayMinutes": 1,
+  "reminderTarget": "qqbot:c2c:USER_OPENID",
+  "reminderAccountId": "bot_b"
+}
+```
+
+## 跨 Agent 提醒流程
+
+如果一个 Agent 要管理另一个 Agent 绑定的 QQ 会话提醒：
+
+1. 先使用系统 `sessions_list`
+2. 定位目标 QQ 会话
+3. 再传 `reminderTarget`
+4. 如有需要，再传 `reminderAccountId`
+
+如果 `sessions_list` 看不到其他 Agent 的会话，宿主通常需要这样的配置：
+
+```json
+{
+  "tools": {
+    "profile": "full",
+    "sessions": {
+      "visibility": "all"
+    },
+    "agentToAgent": {
+      "enabled": true,
+      "allow": ["agent-b"]
+    }
+  }
+}
+```
+
+## IM 风格回复
+
+这个 fork 可以把较长的被动纯文本回复拆成更短的 IM 风格消息。
+
+优先级：
 
 1. `channels.qqbot.accounts.<accountId>.imStyleReply`
 2. `channels.qqbot.imStyleReply`
 
-### 支持字段
+支持字段：
 
 - `enabled`
 - `minLength`
@@ -219,18 +286,16 @@ QQBOT_PAYLOAD:
 - `delayMinMs`
 - `delayMaxMs`
 
-如果同时配置了 `delayMs` 和 `delayMinMs/delayMaxMs`，优先使用区间延迟。
-
-### 示例
+示例：
 
 ```json
 {
   "channels": {
     "qqbot": {
       "accounts": {
-        "huajin": {
-          "appId": "1903057687",
-          "clientSecret": "secret-b",
+        "bot_b": {
+          "appId": "YOUR_SECONDARY_APP_ID",
+          "clientSecret": "YOUR_SECONDARY_CLIENT_SECRET",
           "imStyleReply": {
             "enabled": true,
             "minLength": 18,
@@ -247,39 +312,18 @@ QQBOT_PAYLOAD:
 }
 ```
 
-说明：
+结构化 markdown 会保持原样，不做拆分。
 
-- 只对纯文本被动回复生效
-- `<qqimg>` / `<qqvoice>` / `<qqvideo>` / `<qqfile>` / `QQBOT_PAYLOAD` 不会被拆
-- 代码块、列表、标题、引用等格式化内容不会启用该拆分
+## 已知限制
 
-## 本地部署与远程使用
-
-即使没有公网 IP，只要本地机器能主动连出：
-
-- QQ Bot 网关
-- 你配置的模型 / STT / TTS 服务
-
-那么 QQ 侧仍然可以远程操作这台本地 OpenClaw。
-
-这不等于你可以直接从公网访问 Control UI。Control UI 仍然需要：
-
-- SSH 隧道
-- Tailscale / ZeroTier
-- 反向代理 / 内网穿透
-
-## 已知行为
-
-- `STT` 是插件自动处理的，模型拿到的是转写后的结果
-- `TTS` 是模型主动选择的发送方式，需要它输出 `<qqvoice>` 或 `QQBOT_PAYLOAD`
-- `QQBOT_PAYLOAD` 如果格式错误，当前 fork 会拦截并记日志，不再把内部协议错误直接发给用户
-- 被动回复存在平台侧次数限制，插件当前按单条 `message_id` 维护回复计数
+- reminder 投递属于外发动作，不会自动回流到原始会话 transcript
+- `qqbot_list_reminders` 只有在底层任务仍存在时，才能返回 `lastRunAtMs` 和 `lastRunStatus`
+- 一次性提醒如果执行后立即删除，后续查询里可能看不到执行痕迹
+- QQ 平台侧发送限制依然存在
 
 ## 故障排查
 
-### 账号显示已配置，但收不到消息
-
-先看前台日志：
+### 收不到消息
 
 ```bash
 openclaw gateway stop
@@ -289,19 +333,14 @@ openclaw gateway run --verbose
 常见原因：
 
 - `invalid appid or secret`
-- QQ 平台权限不完整
-- 该账号没有真正走到 `READY`
+- QQ 平台权限缺失
+- 账号没有进入 `READY`
+- 部署的是旧包，不是这个 fork 的最新构建
 
 ### `clientSecret` 变成了 `"__OPENCLAW_REDACTED__"`
 
-如果配置文件磁盘里真的被写成这个字面值，那它不是“显示脱敏”，而是凭证已经被错误覆盖，需要手工改回真实密钥。
-
-### IM 风格配置不生效
-
-确认你部署的是这个 fork 的最新打包版本，而不是更早的 `.tgz`。
+如果磁盘上的字面值真的是 `"__OPENCLAW_REDACTED__"`，说明凭证被覆盖了，需要手工恢复真实密钥。
 
 ## License
 
 本 fork 继续沿用上游的 [MIT License](LICENSE)。
-
-请保留原许可证和版权声明。
