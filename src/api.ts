@@ -356,29 +356,6 @@ export async function sendC2CInputNotify(
   await apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
 }
 
-export async function sendChannelMessage(
-  accessToken: string,
-  channelId: string,
-  content: string,
-  msgId?: string
-): Promise<{ id: string; timestamp: string }> {
-  return apiRequest(accessToken, "POST", `/channels/${channelId}/messages`, {
-    content,
-    ...(msgId ? { msg_id: msgId } : {}),
-  });
-}
-
-export async function sendGroupMessage(
-  accessToken: string,
-  groupOpenid: string,
-  content: string,
-  msgId?: string
-): Promise<MessageResponse> {
-  const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(content, msgId, msgSeq);
-  return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body);
-}
-
 function buildProactiveMessageBody(content: string): Record<string, unknown> {
   if (!content || content.trim().length === 0) {
     throw new Error("主动消息内容不能为空 (markdown.content is empty)");
@@ -397,15 +374,6 @@ export async function sendProactiveC2CMessage(
 ): Promise<{ id: string; timestamp: number }> {
   const body = buildProactiveMessageBody(content);
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
-}
-
-export async function sendProactiveGroupMessage(
-  accessToken: string,
-  groupOpenid: string,
-  content: string
-): Promise<{ id: string; timestamp: string }> {
-  const body = buildProactiveMessageBody(content);
-  return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body);
 }
 
 // ============ 富媒体消息支持 ============
@@ -459,41 +427,6 @@ export async function uploadC2CMedia(
   return result;
 }
 
-export async function uploadGroupMedia(
-  accessToken: string,
-  groupOpenid: string,
-  fileType: MediaFileType,
-  url?: string,
-  fileData?: string,
-  srvSendMsg = false,
-  fileName?: string,
-): Promise<UploadMediaResponse> {
-  if (!url && !fileData) throw new Error("uploadGroupMedia: url or fileData is required");
-  
-  if (fileData) {
-    const contentHash = computeFileHash(fileData);
-    const cachedInfo = getCachedFileInfo(contentHash, "group", groupOpenid, fileType);
-    if (cachedInfo) {
-      return { file_uuid: "", file_info: cachedInfo, ttl: 0 };
-    }
-  }
-  
-  const body: Record<string, unknown> = { file_type: fileType, srv_send_msg: srvSendMsg };
-  if (url) body.url = url;
-  else if (fileData) body.file_data = fileData;
-  if (fileType === MediaFileType.FILE && fileName) body.file_name = sanitizeFileName(fileName);
-  
-  const result = await apiRequestWithRetry<UploadMediaResponse>(
-    accessToken, "POST", `/v2/groups/${groupOpenid}/files`, body
-  );
-  
-  if (fileData && result.file_info && result.ttl > 0) {
-    const contentHash = computeFileHash(fileData);
-    setCachedFileInfo(contentHash, "group", groupOpenid, fileType, result.file_info, result.file_uuid, result.ttl);
-  }
-  return result;
-}
-
 export async function sendC2CMediaMessage(
   accessToken: string,
   openid: string,
@@ -503,23 +436,6 @@ export async function sendC2CMediaMessage(
 ): Promise<{ id: string; timestamp: number }> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, {
-    msg_type: 7,
-    media: { file_info: fileInfo },
-    msg_seq: msgSeq,
-    ...(content ? { content } : {}),
-    ...(msgId ? { msg_id: msgId } : {}),
-  });
-}
-
-export async function sendGroupMediaMessage(
-  accessToken: string,
-  groupOpenid: string,
-  fileInfo: string,
-  msgId?: string,
-  content?: string
-): Promise<{ id: string; timestamp: string }> {
-  const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, {
     msg_type: 7,
     media: { file_info: fileInfo },
     msg_seq: msgSeq,
@@ -540,26 +456,9 @@ export async function sendC2CImageMessage(accessToken: string, openid: string, i
   return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
 }
 
-export async function sendGroupImageMessage(accessToken: string, groupOpenid: string, imageUrl: string, msgId?: string, content?: string): Promise<{ id: string; timestamp: string }> {
-  let uploadResult: UploadMediaResponse;
-  if (imageUrl.startsWith("data:")) {
-    const matches = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (!matches) throw new Error("Invalid Base64 Data URL format");
-    uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.IMAGE, undefined, matches[2], false);
-  } else {
-    uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.IMAGE, imageUrl, undefined, false);
-  }
-  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
-}
-
 export async function sendC2CVoiceMessage(accessToken: string, openid: string, voiceBase64: string, msgId?: string): Promise<{ id: string; timestamp: number }> {
   const uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VOICE, undefined, voiceBase64, false);
   return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId);
-}
-
-export async function sendGroupVoiceMessage(accessToken: string, groupOpenid: string, voiceBase64: string, msgId?: string): Promise<{ id: string; timestamp: string }> {
-  const uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.VOICE, undefined, voiceBase64, false);
-  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId);
 }
 
 export async function sendC2CFileMessage(accessToken: string, openid: string, fileBase64?: string, fileUrl?: string, msgId?: string, fileName?: string): Promise<{ id: string; timestamp: number }> {
@@ -567,19 +466,9 @@ export async function sendC2CFileMessage(accessToken: string, openid: string, fi
   return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId);
 }
 
-export async function sendGroupFileMessage(accessToken: string, groupOpenid: string, fileBase64?: string, fileUrl?: string, msgId?: string, fileName?: string): Promise<{ id: string; timestamp: string }> {
-  const uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.FILE, fileUrl, fileBase64, false, fileName);
-  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId);
-}
-
 export async function sendC2CVideoMessage(accessToken: string, openid: string, videoUrl?: string, videoBase64?: string, msgId?: string, content?: string): Promise<{ id: string; timestamp: number }> {
   const uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VIDEO, videoUrl, videoBase64, false);
   return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
-}
-
-export async function sendGroupVideoMessage(accessToken: string, groupOpenid: string, videoUrl?: string, videoBase64?: string, msgId?: string, content?: string): Promise<{ id: string; timestamp: string }> {
-  const uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.VIDEO, videoUrl, videoBase64, false);
-  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
 }
 
 // ==========================================

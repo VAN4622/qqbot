@@ -4,7 +4,7 @@
  * QQ Bot API 上传文件后返回 file_info + ttl，在 TTL 内相同文件可直接复用 file_info
  * 避免重复上传同一文件，节省带宽和时间。
  * 
- * 缓存 key = md5(fileContent) + targetType(c2c/group) + targetId + fileType
+ * 缓存 key = md5(fileContent) + targetType(c2c) + targetId + fileType
  */
 
 import * as crypto from "node:crypto";
@@ -35,8 +35,8 @@ export function computeFileHash(data: string | Buffer): string {
 /**
  * 构建缓存 key
  * @param contentHash - 文件内容 hash
- * @param scope - "c2c" | "group"
- * @param targetId - 用户 openid 或群 openid
+ * @param scope - "c2c"
+ * @param targetId - 用户 openid
  * @param fileType - 1=IMAGE, 2=VIDEO, 3=VOICE, 4=FILE
  */
 function buildCacheKey(contentHash: string, scope: string, targetId: string, fileType: number): string {
@@ -49,7 +49,7 @@ function buildCacheKey(contentHash: string, scope: string, targetId: string, fil
  */
 export function getCachedFileInfo(
   contentHash: string,
-  scope: "c2c" | "group",
+  scope: "c2c",
   targetId: string,
   fileType: number,
 ): string | null {
@@ -74,7 +74,7 @@ export function getCachedFileInfo(
  */
 export function setCachedFileInfo(
   contentHash: string,
-  scope: "c2c" | "group",
+  scope: "c2c",
   targetId: string,
   fileType: number,
   fileInfo: string,

@@ -33,15 +33,18 @@ metadata: {"openclaw":{"emoji":"⏰","requires":{"config":["channels.qqbot"]}}}
 - 周期提醒可选 `timezone`
 - `qqbot_remove_reminder` 优先用 `id`；拿不到 `id` 时再用 `name`
 
-## 目标规则
+## 会话规则
 
-- 默认直接作用于当前 QQ 会话，不要传 `target` 或 `to`
-- reminder 工具默认会用当前会话；只有明确要为另一个 QQ 会话建提醒时，才传 `reminderTarget`
-- 如果要给另一个 QQ 账号所属的会话建提醒，还要显式传 `reminderAccountId`
-- `reminderTarget` 格式：
-  - 私聊：`qqbot:c2c:<openid>`
-  - 群聊：`qqbot:group:<group_openid>`
-  - 频道：`qqbot:channel:<channel_id>`
+- 默认 agent 下，QQBot reminder 会写回当前会话上下文
+- 非默认 agent 下，QQBot reminder 会自动切到隔离任务，并把结果投递回当前 QQ 会话
+- 不要传 `target` 或 `to`
+- 默认直接使用当前会话的 `sessionKey`
+- 只有明确要为另一个 QQ 会话建提醒时，才传：
+  - `reminderSessionKey`
+  - 可选 `reminderTarget`
+  - 可选 `reminderAccountId`
+  - 可选 `reminderAgentId`
+- `reminderTarget` 仅支持私聊格式：`qqbot:c2c:<openid>`
 
 ## 最小示例
 
@@ -64,24 +67,28 @@ metadata: {"openclaw":{"emoji":"⏰","requires":{"config":["channels.qqbot"]}}}
 }
 ```
 
-跨账号示例：
+跨账号 / 跨 Agent 示例：
 
 ```json
 {
   "message": "提醒用户回看这个会话。",
   "delayMinutes": 1,
+  "reminderSessionKey": "agent:assistant-b:qqbot:direct:USER_OPENID",
   "reminderTarget": "qqbot:c2c:USER_OPENID",
-  "reminderAccountId": "secondary"
+  "reminderAccountId": "secondary",
+  "reminderAgentId": "assistant-b"
 }
 ```
 
 ## 跨 Agent 会话
 
 - 如果用户要“给另一个 Agent / 另一个会话设置提醒”，先使用系统的 `sessions_list` 工具查目标会话
-- 只有拿到目标会话对应的 QQ 会话信息后，才去调用 QQBot reminder 工具
+- 只有拿到目标会话对应的 `sessionKey` 后，才去调用 QQBot reminder 工具
 - 跨 Agent 场景下，通常要同时传：
+  - `reminderSessionKey`
   - `reminderTarget`
   - `reminderAccountId`
+  - `reminderAgentId`
 
 如果 `sessions_list` 看不到其他 Agent 的会话，通常不是 QQBot reminder 工具的问题，而是宿主权限没开。常见原因是下面两项没有开启：
 
@@ -109,5 +116,5 @@ metadata: {"openclaw":{"emoji":"⏰","requires":{"config":["channels.qqbot"]}}}
 ## 回复风格
 
 - 创建成功后，简短确认即可。
-- 查询时，优先带上最近一次执行时间和执行状态（如果工具返回了 `lastRunAtMs` / `lastRunStatus`）。
+- 查询时，优先带上最近一次执行时间和执行状态。
 - 删除成功后，明确说明已取消。

@@ -88,7 +88,7 @@ function readOptionalStringStrict(
 function normalizeQQBotTarget(target: string): string | undefined {
   const id = target.replace(/^qqbot:/i, "");
 
-  if (id.startsWith("c2c:") || id.startsWith("group:") || id.startsWith("channel:")) {
+  if (id.startsWith("c2c:")) {
     return `qqbot:${id}`;
   }
 
@@ -186,7 +186,7 @@ function validateQQBotSendParams(params: Record<string, unknown>, fallbackAccoun
   }
   const to = normalizeQQBotTarget(rawTo);
   if (!to) {
-    throw new Error("to must be a valid QQBot target such as qqbot:c2c:OPENID or qqbot:group:GROUPID");
+    throw new Error("to must be a valid QQBot C2C target such as qqbot:c2c:OPENID");
   }
 
   const channel = readOptionalStringStrict(params, "channel");
@@ -237,7 +237,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     order: 50,
   },
   capabilities: {
-    chatTypes: ["direct", "group"],
+    chatTypes: ["direct"],
     media: true,
     reactions: false,
     threads: false,
@@ -351,11 +351,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
      * 规范化目标地址
      * 支持以下格式：
      * - qqbot:c2c:openid -> 私聊
-     * - qqbot:group:groupid -> 群聊
-     * - qqbot:channel:channelid -> 频道
      * - c2c:openid -> 私聊
-     * - group:groupid -> 群聊
-     * - channel:channelid -> 频道
      * - 纯 openid（32位十六进制）-> 私聊
      */
     normalizeTarget: ((target: string): string | undefined => normalizeQQBotTarget(target)) as any,
@@ -368,20 +364,16 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
        * 判断目标 ID 是否可能是 QQ Bot 格式
        * 支持以下格式：
        * - qqbot:c2c:xxx
-       * - qqbot:group:xxx  
-       * - qqbot:channel:xxx
        * - c2c:xxx
-       * - group:xxx
-       * - channel:xxx
        * - UUID 格式的 openid
        */
       looksLikeId: (id: string): boolean => {
         // 带 qqbot: 前缀的格式
-        if (/^qqbot:(c2c|group|channel):/i.test(id)) {
+        if (/^qqbot:c2c:/i.test(id)) {
           return true;
         }
         // 不带前缀但有类型标识
-        if (/^(c2c|group|channel):/i.test(id)) {
+        if (/^c2c:/i.test(id)) {
           return true;
         }
         // 32位十六进制 openid（不带连字符）
@@ -392,7 +384,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         const openIdPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
         return openIdPattern.test(id);
       },
-      hint: "QQ Bot 目标格式: qqbot:c2c:openid (私聊) 或 qqbot:group:groupid (群聊)",
+      hint: "QQ Bot 目标格式: qqbot:c2c:openid (私聊)",
     },
   },
   agentPrompt: {

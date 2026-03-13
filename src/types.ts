@@ -1,4 +1,4 @@
-/**
+﻿/**
  * QQ Bot 配置类型
  */
 export interface QQBotConfig {
@@ -107,15 +107,10 @@ export interface QQBotTTSConfig {
 export interface AudioFormatPolicy {
   /**
    * STT 模型直接支持的音频格式（入站：跳过 SILK→WAV 转换）
-   * 如果 STT 服务支持直接处理某些格式（如 silk/amr），可将其加入此列表
-   * 例如: [".silk", ".amr", ".wav", ".mp3", ".ogg"]
-   * 默认为空（所有语音都先转换为 WAV 再送 STT）
    */
   sttDirectFormats?: string[];
   /**
    * QQ 平台支持直传的音频格式（出站：跳过→SILK 转换）
-   * 默认为 [".wav", ".mp3", ".silk"]（QQ Bot API 原生支持的三种格式）
-   * 仅当需要覆盖默认值时才配置此项
    */
   uploadDirectFormats?: string[];
 }
@@ -124,13 +119,13 @@ export interface AudioFormatPolicy {
  * 富媒体附件
  */
 export interface MessageAttachment {
-  content_type: string;  // 如 "image/png"
+  content_type: string;
   filename?: string;
   height?: number;
   width?: number;
   size?: number;
   url: string;
-  voice_wav_url?: string;  // QQ 提供的 WAV 格式语音直链，有值时优先使用以避免 SILK→WAV 转换
+  voice_wav_url?: string;
 }
 
 /**
@@ -148,43 +143,6 @@ export interface C2CMessageEvent {
   message_scene?: {
     source: string;
   };
-  attachments?: MessageAttachment[];
-}
-
-/**
- * 频道 AT 消息事件
- */
-export interface GuildMessageEvent {
-  id: string;
-  channel_id: string;
-  guild_id: string;
-  content: string;
-  timestamp: string;
-  author: {
-    id: string;
-    username?: string;
-    bot?: boolean;
-  };
-  member?: {
-    nick?: string;
-    joined_at?: string;
-  };
-  attachments?: MessageAttachment[];
-}
-
-/**
- * 群聊 AT 消息事件
- */
-export interface GroupMessageEvent {
-  author: {
-    id: string;
-    member_openid: string;
-  };
-  content: string;
-  id: string;
-  timestamp: string;
-  group_id: string;
-  group_openid: string;
   attachments?: MessageAttachment[];
 }
 

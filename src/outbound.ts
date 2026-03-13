@@ -7,18 +7,11 @@ import type { QQBotIMStyleReplyConfig, ResolvedQQBotAccount } from "./types.js";
 import {
   getAccessToken, 
   sendC2CMessage, 
-  sendChannelMessage, 
-  sendGroupMessage,
   sendProactiveC2CMessage,
-  sendProactiveGroupMessage,
   sendC2CImageMessage,
-  sendGroupImageMessage,
   sendC2CVoiceMessage,
-  sendGroupVoiceMessage,
   sendC2CVideoMessage,
-  sendGroupVideoMessage,
   sendC2CFileMessage,
-  sendGroupFileMessage,
 } from "./api.js";
 import { isAudioFile, audioFileToSilkBase64, waitForFile, resolveTTSConfig, textToSilk } from "./utils/audio-convert.js";
 import { checkFileSize, readFileAsync, fileExistsAsync, isLargeFile, formatFileSize } from "./utils/file-utils.js";
@@ -185,35 +178,17 @@ function splitIntoImStyleParts(text: string, config: Required<QQBotIMStyleReplyC
 
 async function sendPlainTextMessage(
   accessToken: string,
-  target: { type: "c2c" | "group" | "channel"; id: string },
+  target: { type: "c2c"; id: string },
   text: string,
   replyToId?: string | null,
 ): Promise<OutboundResult> {
   if (replyToId) {
-    if (target.type === "c2c") {
-      const result = await sendC2CMessage(accessToken, target.id, text, replyToId);
-      recordMessageReply(replyToId);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    }
-    if (target.type === "group") {
-      const result = await sendGroupMessage(accessToken, target.id, text, replyToId);
-      recordMessageReply(replyToId);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    }
-    const result = await sendChannelMessage(accessToken, target.id, text, replyToId);
+    const result = await sendC2CMessage(accessToken, target.id, text, replyToId);
     recordMessageReply(replyToId);
     return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
   }
 
-  if (target.type === "c2c") {
-    const result = await sendProactiveC2CMessage(accessToken, target.id, text);
-    return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-  }
-  if (target.type === "group") {
-    const result = await sendProactiveGroupMessage(accessToken, target.id, text);
-    return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-  }
-  const result = await sendChannelMessage(accessToken, target.id, text);
+  const result = await sendProactiveC2CMessage(accessToken, target.id, text);
   return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
 }
 
@@ -355,11 +330,8 @@ export interface OutboundResult {
  * 解析目标地址
  * 格式：
  *   - openid (32位十六进制) -> C2C 单聊
- *   - group:xxx -> 群聊
- *   - channel:xxx -> 频道
- *   - 纯数字 -> 频道
  */
-function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: string } {
+function parseTarget(to: string): { type: "c2c"; id: string } {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] [qqbot] parseTarget: input=${to}`);
   
@@ -375,28 +347,6 @@ function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: strin
     }
     console.log(`[${timestamp}] [qqbot] parseTarget: c2c target, user ID=${userId}`);
     return { type: "c2c", id: userId };
-  }
-  
-  if (id.startsWith("group:")) {
-    const groupId = id.slice(6);
-    if (!groupId || groupId.length === 0) {
-      const error = `Invalid group target format: ${to} - missing group ID`;
-      console.error(`[${timestamp}] [qqbot] parseTarget: ${error}`);
-      throw new Error(error);
-    }
-    console.log(`[${timestamp}] [qqbot] parseTarget: group target, group ID=${groupId}`);
-    return { type: "group", id: groupId };
-  }
-  
-  if (id.startsWith("channel:")) {
-    const channelId = id.slice(8);
-    if (!channelId || channelId.length === 0) {
-      const error = `Invalid channel target format: ${to} - missing channel ID`;
-      console.error(`[${timestamp}] [qqbot] parseTarget: ${error}`);
-      throw new Error(error);
-    }
-    console.log(`[${timestamp}] [qqbot] parseTarget: channel target, channel ID=${channelId}`);
-    return { type: "channel", id: channelId };
   }
   
   // 默认当作 c2c（私聊）
@@ -518,10 +468,10 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
 }
 
 /**
- * 主动发送消息（不需要 replyToId，有配额限制：每月 4 条/用户/群）
+ * 主动发送消息（不需要 replyToId，有配额限制）
  * 
  * @param account - 账户配置
- * @param to - 目标地址，格式：openid（单聊）或 group:xxx（群聊）
+ * @param to - 目标地址，格式：openid（单聊）
  * @param text - 消息内容
  */
 export async function sendProactiveMessage(
@@ -547,23 +497,10 @@ export async function sendProactiveMessage(
     const target = parseTarget(to);
     console.log(`[${timestamp}] [qqbot] sendProactiveMessage: target parsed, type=${target.type}, id=${target.id}`);
 
-    if (target.type === "c2c") {
-      console.log(`[${timestamp}] [qqbot] sendProactiveMessage: sending proactive C2C message to user=${target.id}`);
-      const result = await sendProactiveC2CMessage(accessToken, target.id, text);
-      console.log(`[${timestamp}] [qqbot] sendProactiveMessage: proactive C2C message sent successfully, messageId=${result.id}`);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    } else if (target.type === "group") {
-      console.log(`[${timestamp}] [qqbot] sendProactiveMessage: sending proactive group message to group=${target.id}`);
-      const result = await sendProactiveGroupMessage(accessToken, target.id, text);
-      console.log(`[${timestamp}] [qqbot] sendProactiveMessage: proactive group message sent successfully, messageId=${result.id}`);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    } else {
-      // 频道暂不支持主动消息，使用普通发送
-      console.log(`[${timestamp}] [qqbot] sendProactiveMessage: sending channel message to channel=${target.id}`);
-      const result = await sendChannelMessage(accessToken, target.id, text);
-      console.log(`[${timestamp}] [qqbot] sendProactiveMessage: channel message sent successfully, messageId=${result.id}`);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    }
+    console.log(`[${timestamp}] [qqbot] sendProactiveMessage: sending proactive C2C message to user=${target.id}`);
+    const result = await sendProactiveC2CMessage(accessToken, target.id, text);
+    console.log(`[${timestamp}] [qqbot] sendProactiveMessage: proactive C2C message sent successfully, messageId=${result.id}`);
+    return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     console.error(`[${timestamp}] [qqbot] sendProactiveMessage: error: ${errorMessage}`);
@@ -585,27 +522,8 @@ export async function sendProactiveMessage(
  * 
  * @example
  * ```typescript
- * // 发送网络图片
  * const result = await sendMedia({
- *   to: "group:xxx",
- *   text: "这是图片说明",
- *   mediaUrl: "https://example.com/image.png",
- *   account,
- *   replyToId: msgId,
- * });
- * 
- * // 发送 Base64 图片
- * const result = await sendMedia({
- *   to: "group:xxx",
- *   text: "这是图片说明",
- *   mediaUrl: "data:image/png;base64,iVBORw0KGgo...",
- *   account,
- *   replyToId: msgId,
- * });
- * 
- * // 发送本地文件（自动读取并转换为 Base64）
- * const result = await sendMedia({
- *   to: "group:xxx",
+ *   to: "qqbot:c2c:USER_OPENID",
  *   text: "这是图片说明",
  *   mediaUrl: "/tmp/generated-chart.png",
  *   account,
@@ -714,29 +632,13 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
     const accessToken = await getAccessToken(account.appId, account.clientSecret);
     const target = parseTarget(to);
 
-    let imageResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      imageResult = await sendC2CImageMessage(
-        accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined
-      );
-    } else if (target.type === "group") {
-      imageResult = await sendGroupImageMessage(
-        accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined
-      );
-    } else {
-      const displayUrl = isLocalPath ? "[本地文件]" : mediaUrl;
-      const textWithUrl = text ? `${text}\n${displayUrl}` : displayUrl;
-      const result = await sendChannelMessage(accessToken, target.id, textWithUrl, replyToId ?? undefined);
-      return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
-    }
+    const imageResult = await sendC2CImageMessage(
+      accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined
+    );
 
     if (text?.trim()) {
       try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
+        await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
       } catch (textErr) {
         console.error(`[qqbot] Failed to send text after image: ${textErr}`);
       }
@@ -777,15 +679,7 @@ async function sendVoiceFile(ctx: MediaOutboundContext): Promise<OutboundResult>
       const accessToken = await getAccessToken(account.appId!, account.clientSecret!);
       const target = parseTarget(to);
 
-      let result: { id: string; timestamp: number | string };
-      if (target.type === "c2c") {
-        result = await sendC2CVoiceMessage(accessToken, target.id, fallbackBase64, replyToId ?? undefined);
-      } else if (target.type === "group") {
-        result = await sendGroupVoiceMessage(accessToken, target.id, fallbackBase64, replyToId ?? undefined);
-      } else {
-        const r = await sendChannelMessage(accessToken, target.id, `[语音消息暂不支持频道发送]`, replyToId ?? undefined);
-        return { channel: "qqbot", messageId: r.id, timestamp: r.timestamp };
-      }
+      const result = await sendC2CVoiceMessage(accessToken, target.id, fallbackBase64, replyToId ?? undefined);
 
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     }
@@ -795,24 +689,12 @@ async function sendVoiceFile(ctx: MediaOutboundContext): Promise<OutboundResult>
     const accessToken = await getAccessToken(account.appId!, account.clientSecret!);
     const target = parseTarget(to);
 
-    let voiceResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      voiceResult = await sendC2CVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-    } else if (target.type === "group") {
-      voiceResult = await sendGroupVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-    } else {
-      const r = await sendChannelMessage(accessToken, target.id, `[语音消息暂不支持频道发送]`, replyToId ?? undefined);
-      return { channel: "qqbot", messageId: r.id, timestamp: r.timestamp };
-    }
+    const voiceResult = await sendC2CVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
 
     // 如果有文本说明，再发送一条文本消息
     if (text?.trim()) {
       try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
+        await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
       } catch (textErr) {
         console.error(`[qqbot] Failed to send text after voice: ${textErr}`);
       }
@@ -857,24 +739,12 @@ async function sendVideoUrl(ctx: MediaOutboundContext): Promise<OutboundResult> 
     const accessToken = await getAccessToken(account.appId, account.clientSecret);
     const target = parseTarget(to);
 
-    let videoResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      videoResult = await sendC2CVideoMessage(accessToken, target.id, mediaUrl, undefined, replyToId ?? undefined);
-    } else if (target.type === "group") {
-      videoResult = await sendGroupVideoMessage(accessToken, target.id, mediaUrl, undefined, replyToId ?? undefined);
-    } else {
-      const r = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-      return { channel: "qqbot", messageId: r.id, timestamp: r.timestamp };
-    }
+    const videoResult = await sendC2CVideoMessage(accessToken, target.id, mediaUrl, undefined, replyToId ?? undefined);
 
     // 如果有文本说明，再发送一条文本消息
     if (text?.trim()) {
       try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
+        await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
       } catch (textErr) {
         console.error(`[qqbot] Failed to send text after video: ${textErr}`);
       }
@@ -920,24 +790,12 @@ async function sendVideoFile(ctx: MediaOutboundContext): Promise<OutboundResult>
     const accessToken = await getAccessToken(account.appId, account.clientSecret);
     const target = parseTarget(to);
 
-    let videoResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      videoResult = await sendC2CVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined);
-    } else if (target.type === "group") {
-      videoResult = await sendGroupVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined);
-    } else {
-      const r = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-      return { channel: "qqbot", messageId: r.id, timestamp: r.timestamp };
-    }
+    const videoResult = await sendC2CVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined);
 
     // 如果有文本说明，再发送一条文本消息
     if (text?.trim()) {
       try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
+        await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
       } catch (textErr) {
         console.error(`[qqbot] Failed to send text after video: ${textErr}`);
       }
@@ -973,19 +831,10 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
     const accessToken = await getAccessToken(account.appId, account.clientSecret);
     const target = parseTarget(to);
 
-    let fileResult: { id: string; timestamp: number | string };
-
     if (isHttpUrl) {
       // 公网 URL：通过 url 参数上传
       console.log(`[qqbot] sendDocumentFile: uploading via URL: ${mediaUrl}`);
-      if (target.type === "c2c") {
-        fileResult = await sendC2CFileMessage(accessToken, target.id, undefined, mediaUrl, replyToId ?? undefined, fileName);
-      } else if (target.type === "group") {
-        fileResult = await sendGroupFileMessage(accessToken, target.id, undefined, mediaUrl, replyToId ?? undefined, fileName);
-      } else {
-        const r = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-        return { channel: "qqbot", messageId: r.id, timestamp: r.timestamp };
-      }
+      var fileResult = await sendC2CFileMessage(accessToken, target.id, undefined, mediaUrl, replyToId ?? undefined, fileName);
     } else {
       // 本地文件：读取转 Base64 上传
       if (!(await fileExistsAsync(mediaUrl))) {
@@ -1006,24 +855,13 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
       const fileBase64 = fileBuffer.toString("base64");
       console.log(`[qqbot] sendDocumentFile: read local file (${formatFileSize(fileBuffer.length)}), uploading...`);
 
-      if (target.type === "c2c") {
-        fileResult = await sendC2CFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName);
-      } else if (target.type === "group") {
-        fileResult = await sendGroupFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName);
-      } else {
-        const r = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-        return { channel: "qqbot", messageId: r.id, timestamp: r.timestamp };
-      }
+      var fileResult = await sendC2CFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName);
     }
 
     // 如果有附带文本说明，再发送一条文本消息
     if (text?.trim()) {
       try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
+        await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
       } catch (textErr) {
         console.error(`[qqbot] Failed to send text after file: ${textErr}`);
       }
@@ -1051,6 +889,50 @@ function isVideoResource(resource: string): boolean {
   const clean = resource.split("?")[0]!;
   const ext = path.extname(clean).toLowerCase();
   return [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"].includes(ext);
+}
+
+type RemoteMediaKind = "image" | "video" | "audio" | "file" | "unknown";
+
+async function detectRemoteMediaKind(resource: string): Promise<RemoteMediaKind> {
+  if (!(resource.startsWith("http://") || resource.startsWith("https://"))) {
+    return "unknown";
+  }
+
+  const methods: Array<"HEAD" | "GET"> = ["HEAD", "GET"];
+
+  for (const method of methods) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+    try {
+      const response = await fetch(resource, {
+        method,
+        signal: controller.signal,
+        redirect: "follow",
+        headers: method === "GET" ? { Range: "bytes=0-0" } : undefined,
+      });
+
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (contentType.startsWith("image/")) {
+        return "image";
+      }
+      if (contentType.startsWith("video/")) {
+        return "video";
+      }
+      if (contentType.startsWith("audio/")) {
+        return "audio";
+      }
+      if (contentType) {
+        return "file";
+      }
+    } catch {
+      // Ignore probe errors and fall through to extension-based fallback.
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  return "unknown";
 }
 
 export interface QQBotSendActionContext {
@@ -1112,7 +994,23 @@ export async function sendQQBotAction(ctx: QQBotSendActionContext): Promise<Outb
     });
   }
 
+  let remoteMediaKind: RemoteMediaKind = "unknown";
+  if (!isImageResource(media) && !isVideoResource(media) && (media.startsWith("http://") || media.startsWith("https://"))) {
+    remoteMediaKind = await detectRemoteMediaKind(media);
+  }
+
   if (isImageResource(media)) {
+    return await sendMedia({
+      to: ctx.to,
+      text,
+      mediaUrl: media,
+      accountId: ctx.accountId,
+      replyToId: ctx.replyToId,
+      account: ctx.account,
+    });
+  }
+
+  if (remoteMediaKind === "image") {
     return await sendMedia({
       to: ctx.to,
       text,
@@ -1138,6 +1036,17 @@ export async function sendQQBotAction(ctx: QQBotSendActionContext): Promise<Outb
     const isHttpUrl = media.startsWith("http://") || media.startsWith("https://");
     const fn = isHttpUrl ? sendVideoUrl : sendVideoFile;
     return await fn({
+      to: ctx.to,
+      text,
+      mediaUrl: media,
+      accountId: ctx.accountId,
+      replyToId: ctx.replyToId,
+      account: ctx.account,
+    });
+  }
+
+  if (remoteMediaKind === "video") {
+    return await sendVideoUrl({
       to: ctx.to,
       text,
       mediaUrl: media,

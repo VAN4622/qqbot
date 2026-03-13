@@ -21,6 +21,8 @@ type ReminderTargetParams = {
   reminderTarget?: string;
   reminderAccountId?: string;
   accountId?: string;
+  reminderSessionKey?: string;
+  reminderAgentId?: string;
 };
 
 function normalizeQQBotTarget(target: string): string | undefined {
@@ -35,9 +37,9 @@ function normalizeQQBotTarget(target: string): string | undefined {
     return rawId;
   };
 
-  if (id.startsWith("c2c:") || id.startsWith("group:") || id.startsWith("channel:")) {
-    const [kind, rawId] = id.split(/:(.+)/, 2);
-    return rawId ? `qqbot:${kind}:${canonicalizeId(rawId)}` : undefined;
+  if (id.startsWith("c2c:")) {
+    const rawId = id.slice(4);
+    return rawId ? `qqbot:c2c:${canonicalizeId(rawId)}` : undefined;
   }
 
   const openIdHexPattern = /^[0-9a-fA-F]{32}$/;
@@ -74,26 +76,17 @@ function deriveQQBotTargetFromSessionKey(sessionKey?: string): string | undefine
   let kind = next;
   let idIndex = qqbotIndex + 2;
 
-  if (kind !== "direct" && kind !== "group" && kind !== "channel") {
+  if (kind !== "direct") {
     kind = nextNext;
     idIndex = qqbotIndex + 3;
   }
 
   const peerId = parts[idIndex];
-  if (!kind || !peerId) {
+  if (kind !== "direct" || !peerId) {
     return undefined;
   }
 
-  if (kind === "direct") {
-    return `qqbot:c2c:${peerId}`;
-  }
-  if (kind === "group") {
-    return `qqbot:group:${peerId}`;
-  }
-  if (kind === "channel") {
-    return `qqbot:channel:${peerId}`;
-  }
-  return undefined;
+  return `qqbot:c2c:${peerId}`;
 }
 
 function resolveReminderAccountId(params: ReminderTargetParams, ctx: QQBotReminderToolContext): string | undefined {
@@ -108,23 +101,25 @@ function resolveReminderAccountId(params: ReminderTargetParams, ctx: QQBotRemind
 }
 
 function resolveReminderTarget(params: ReminderTargetParams, ctx: QQBotReminderToolContext): QQBotReminderTarget {
-  const rawTo = params.reminderTarget?.trim() || deriveQQBotTargetFromSessionKey(ctx.sessionKey) || "";
+  const rawSessionKey = params.reminderSessionKey?.trim() || ctx.sessionKey;
+  const rawTo = params.reminderTarget?.trim() || deriveQQBotTargetFromSessionKey(rawSessionKey) || "";
   if (!rawTo) {
     throw new Error("QQBot reminder tools default to the current chat. If session metadata is unavailable, provide reminderTarget.");
   }
 
   const to = normalizeQQBotTarget(rawTo);
   if (!to) {
-    throw new Error("reminderTarget must be a valid QQBot target such as qqbot:c2c:OPENID or qqbot:group:GROUPID");
+    throw new Error("reminderTarget must be a valid QQBot C2C target such as qqbot:c2c:OPENID");
   }
 
   const resolvedAccountId = resolveReminderAccountId(params, ctx);
+  const resolvedAgentId = params.reminderAgentId?.trim() || ctx.agentId;
 
   return {
     to,
     ...(resolvedAccountId ? { accountId: resolvedAccountId } : {}),
-    ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
-    ...(ctx.sessionKey ? { sessionKey: ctx.sessionKey } : {}),
+    ...(resolvedAgentId ? { agentId: resolvedAgentId } : {}),
+    ...(rawSessionKey ? { sessionKey: rawSessionKey } : {}),
   };
 }
 
@@ -159,7 +154,7 @@ function ensureSingleSchedule(params: {
 }
 
 const ScheduleReminderParamsSchema = Type.Object({
-  message: Type.String({ minLength: 1, description: "Reminder text to send back to QQ." }),
+  message: Type.String({ minLength: 1, description: "Reminder text to inject back into the QQ chat context." }),
   delayMinutes: Type.Optional(Type.Number({ minimum: 0, description: "Delay in minutes before sending the reminder." })),
   delayMs: Type.Optional(Type.Number({ minimum: 0, description: "Delay in milliseconds before sending the reminder." })),
   atMs: Type.Optional(Type.Number({ minimum: 0, description: "Absolute Unix timestamp in milliseconds." })),
@@ -170,6 +165,8 @@ const ScheduleReminderParamsSchema = Type.Object({
   reminderTarget: Type.Optional(Type.String({ minLength: 1, description: "Optional QQBot target override. Omit to use the current chat." })),
   reminderAccountId: Type.Optional(Type.String({ minLength: 1, description: "Optional QQBot account id override for cross-account reminders." })),
   accountId: Type.Optional(Type.String({ minLength: 1, description: "Alias of reminderAccountId." })),
+  reminderSessionKey: Type.Optional(Type.String({ minLength: 1, description: "Optional session key override for cross-session reminders." })),
+  reminderAgentId: Type.Optional(Type.String({ minLength: 1, description: "Optional agent id override for cross-agent reminders." })),
 }, { additionalProperties: false });
 
 const ListRemindersParamsSchema = Type.Object({
@@ -177,6 +174,8 @@ const ListRemindersParamsSchema = Type.Object({
   reminderTarget: Type.Optional(Type.String({ minLength: 1, description: "Optional QQBot target override. Omit to use the current chat." })),
   reminderAccountId: Type.Optional(Type.String({ minLength: 1, description: "Optional QQBot account id override for cross-account reminders." })),
   accountId: Type.Optional(Type.String({ minLength: 1, description: "Alias of reminderAccountId." })),
+  reminderSessionKey: Type.Optional(Type.String({ minLength: 1, description: "Optional session key override for cross-session reminder queries." })),
+  reminderAgentId: Type.Optional(Type.String({ minLength: 1, description: "Optional agent id override for cross-agent reminder queries." })),
 }, { additionalProperties: false });
 
 const RemoveReminderParamsSchema = Type.Object({
@@ -185,6 +184,8 @@ const RemoveReminderParamsSchema = Type.Object({
   reminderTarget: Type.Optional(Type.String({ minLength: 1, description: "Optional QQBot target override. Omit to use the current chat." })),
   reminderAccountId: Type.Optional(Type.String({ minLength: 1, description: "Optional QQBot account id override for cross-account reminders." })),
   accountId: Type.Optional(Type.String({ minLength: 1, description: "Alias of reminderAccountId." })),
+  reminderSessionKey: Type.Optional(Type.String({ minLength: 1, description: "Optional session key override for cross-session reminder removal." })),
+  reminderAgentId: Type.Optional(Type.String({ minLength: 1, description: "Optional agent id override for cross-agent reminder removal." })),
 }, { additionalProperties: false });
 
 type ScheduleReminderParams = Static<typeof ScheduleReminderParamsSchema>;
@@ -198,104 +199,107 @@ export function buildQQBotReminderTools(ctx: QQBotReminderToolContext): AgentToo
   }
 
   const scheduleReminderTool: AgentTool<typeof ScheduleReminderParamsSchema> = {
-      name: "qqbot_schedule_reminder",
-      label: "QQBot Schedule Reminder",
-      description: "Schedule a QQBot reminder for the current chat or an optional reminderTarget.",
-      parameters: ScheduleReminderParamsSchema,
-      execute: async (_toolCallId, params: ScheduleReminderParams) => {
-        const target = resolveReminderTarget(params, ctx);
-        const schedule = ensureSingleSchedule(params);
-        const input: QQBotReminderCreateInput = {
-          ...target,
-          message: params.message.trim(),
-          schedule: schedule.kind === "cron" && params.timezone?.trim()
-            ? { kind: "cron", expr: schedule.expr, timezone: params.timezone.trim() }
-            : schedule,
-          ...(params.name?.trim() ? { name: params.name.trim() } : {}),
-          ...(params.deleteAfterRun !== undefined ? { deleteAfterRun: params.deleteAfterRun } : {}),
-        };
+    name: "qqbot_schedule_reminder",
+    label: "QQBot Schedule Reminder",
+    description: "Schedule a QQBot reminder in the current chat context or an optional reminderSessionKey.",
+    parameters: ScheduleReminderParamsSchema,
+    execute: async (_toolCallId, params: ScheduleReminderParams) => {
+      const target = resolveReminderTarget(params, ctx);
+      const schedule = ensureSingleSchedule(params);
+      const input: QQBotReminderCreateInput = {
+        ...target,
+        message: params.message.trim(),
+        schedule: schedule.kind === "cron" && params.timezone?.trim()
+          ? { kind: "cron", expr: schedule.expr, timezone: params.timezone.trim() }
+          : schedule,
+        ...(params.name?.trim() ? { name: params.name.trim() } : {}),
+        ...(params.deleteAfterRun !== undefined ? { deleteAfterRun: params.deleteAfterRun } : {}),
+      };
 
-        const reminder = await addQQBotReminder(ctx.config as Record<string, unknown>, input);
-        const whenText = reminder.nextRunAtMs
-          ? new Date(reminder.nextRunAtMs).toLocaleString("zh-CN", { hour12: false })
-          : "已创建";
-        return {
-          content: [{ type: "text", text: `Scheduled QQBot reminder "${reminder.name}" for ${whenText}.` }],
-          details: {
-            status: "success",
-            tool: "qqbot_schedule_reminder",
-            id: reminder.id,
-            name: reminder.name,
-            to: reminder.to ?? target.to,
-            nextRunAtMs: reminder.nextRunAtMs ?? null,
-          },
-        };
-      },
-    };
+      const reminder = await addQQBotReminder(ctx.config as Record<string, unknown>, input);
+      const whenText = reminder.nextRunAtMs
+        ? new Date(reminder.nextRunAtMs).toLocaleString("zh-CN", { hour12: false })
+        : "已创建";
+      return {
+        content: [{ type: "text", text: `Scheduled QQBot reminder "${reminder.name}" for ${whenText}.` }],
+        details: {
+          status: "success",
+          tool: "qqbot_schedule_reminder",
+          id: reminder.id,
+          name: reminder.name,
+          to: reminder.to ?? target.to,
+          sessionKey: reminder.sessionKey ?? target.sessionKey ?? null,
+          nextRunAtMs: reminder.nextRunAtMs ?? null,
+        },
+      };
+    },
+  };
 
   const listRemindersTool: AgentTool<typeof ListRemindersParamsSchema> = {
-      name: "qqbot_list_reminders",
-      label: "QQBot List Reminders",
-      description: "List QQBot reminders for the current chat or an optional reminderTarget.",
-      parameters: ListRemindersParamsSchema,
-      execute: async (_toolCallId, params: ListRemindersParams) => {
-        const target = resolveReminderTarget(params, ctx);
-        const reminders = await listQQBotReminders(
-          ctx.config as Record<string, unknown>,
-          target,
-          params.includeDisabled ?? false,
-        );
-        const lines = reminders.length === 0
-          ? ["No QQBot reminders found for this target."]
-          : reminders.map((job, index) => {
-              const next = job.nextRunAtMs ? new Date(job.nextRunAtMs).toLocaleString("zh-CN", { hour12: false }) : "n/a";
-              const lastRun = job.lastRunAtMs ? new Date(job.lastRunAtMs).toLocaleString("zh-CN", { hour12: false }) : "n/a";
-              const lastStatus = job.lastRunStatus ?? "unknown";
-              const status = job.enabled ? "enabled" : "disabled";
-              return `${index + 1}. ${job.name} [${job.id}] (${status}, next: ${next}, last: ${lastRun}, lastStatus: ${lastStatus})`;
-            });
+    name: "qqbot_list_reminders",
+    label: "QQBot List Reminders",
+    description: "List QQBot reminders for the current chat context or an optional reminderSessionKey.",
+    parameters: ListRemindersParamsSchema,
+    execute: async (_toolCallId, params: ListRemindersParams) => {
+      const target = resolveReminderTarget(params, ctx);
+      const reminders = await listQQBotReminders(
+        ctx.config as Record<string, unknown>,
+        target,
+        params.includeDisabled ?? false,
+      );
+      const lines = reminders.length === 0
+        ? ["No QQBot reminders found for this target."]
+        : reminders.map((job, index) => {
+            const next = job.nextRunAtMs ? new Date(job.nextRunAtMs).toLocaleString("zh-CN", { hour12: false }) : "n/a";
+            const lastRun = job.lastRunAtMs ? new Date(job.lastRunAtMs).toLocaleString("zh-CN", { hour12: false }) : "n/a";
+            const lastStatus = job.lastRunStatus ?? "unknown";
+            const status = job.enabled ? "enabled" : "disabled";
+            return `${index + 1}. ${job.name} [${job.id}] (${status}, next: ${next}, last: ${lastRun}, lastStatus: ${lastStatus})`;
+          });
 
-        return {
-          content: [{ type: "text", text: lines.join("\n") }],
-          details: {
-            status: "success",
-            tool: "qqbot_list_reminders",
-            count: reminders.length,
-            to: target.to,
-            reminders,
-          },
-        };
-      },
-    };
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: {
+          status: "success",
+          tool: "qqbot_list_reminders",
+          count: reminders.length,
+          to: target.to,
+          sessionKey: target.sessionKey ?? null,
+          reminders,
+        },
+      };
+    },
+  };
 
   const removeReminderTool: AgentTool<typeof RemoveReminderParamsSchema> = {
-      name: "qqbot_remove_reminder",
-      label: "QQBot Remove Reminder",
-      description: "Remove a QQBot reminder by id or name for the current chat or an optional reminderTarget.",
-      parameters: RemoveReminderParamsSchema,
-      execute: async (_toolCallId, params: RemoveReminderParams) => {
-        if (!params.id?.trim() && !params.name?.trim()) {
-          throw new Error("qqbot_remove_reminder requires either id or name");
-        }
+    name: "qqbot_remove_reminder",
+    label: "QQBot Remove Reminder",
+    description: "Remove a QQBot reminder by id or name for the current chat context or an optional reminderSessionKey.",
+    parameters: RemoveReminderParamsSchema,
+    execute: async (_toolCallId, params: RemoveReminderParams) => {
+      if (!params.id?.trim() && !params.name?.trim()) {
+        throw new Error("qqbot_remove_reminder requires either id or name");
+      }
 
-        const target = resolveReminderTarget(params, ctx);
-        const removed = await removeQQBotReminder(ctx.config as Record<string, unknown>, target, {
-          ...(params.id?.trim() ? { id: params.id.trim() } : {}),
-          ...(params.name?.trim() ? { name: params.name.trim() } : {}),
-        });
+      const target = resolveReminderTarget(params, ctx);
+      const removed = await removeQQBotReminder(ctx.config as Record<string, unknown>, target, {
+        ...(params.id?.trim() ? { id: params.id.trim() } : {}),
+        ...(params.name?.trim() ? { name: params.name.trim() } : {}),
+      });
 
-        return {
-          content: [{ type: "text", text: `Removed QQBot reminder "${removed.name}" (${removed.id}).` }],
-          details: {
-            status: "success",
-            tool: "qqbot_remove_reminder",
-            id: removed.id,
-            name: removed.name,
-            to: target.to,
-          },
-        };
-      },
-    };
+      return {
+        content: [{ type: "text", text: `Removed QQBot reminder "${removed.name}" (${removed.id}).` }],
+        details: {
+          status: "success",
+          tool: "qqbot_remove_reminder",
+          id: removed.id,
+          name: removed.name,
+          to: target.to,
+          sessionKey: target.sessionKey ?? null,
+        },
+      };
+    },
+  };
 
   return [scheduleReminderTool, listRemindersTool, removeReminderTool];
 }

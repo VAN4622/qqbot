@@ -1,6 +1,6 @@
 {
   "name": "@van1024/qqbot",
-  "version": "1.5.5",
+  "version": "1.5.9",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,20 +10,8 @@
     "skills",
     "index.ts",
     "tsconfig.json",
-    "openclaw.plugin.json",
-    "clawdbot.plugin.json",
-    "moltbot.plugin.json"
+    "openclaw.plugin.json"
   ],
-  "clawdbot": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
-  "moltbot": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
   "openclaw": {
     "extensions": [
       "./index.ts"
@@ -35,29 +23,18 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@sinclair/typebox": "^0.34.47",
     "mpg123-decoder": "^1.0.3",
     "silk-wasm": "^3.7.1",
     "ws": "^8.18.0"
   },
-  "bundledDependencies": [
-    "mpg123-decoder",
-    "silk-wasm",
-    "ws"
-  ],
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/ws": "^8.5.0",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "clawdbot": "*",
-    "moltbot": "*",
     "openclaw": "*"
   },
-  "homepage": "https://github.com/vanvan4622/qqbot",
-  "bundleDependencies": [
-    "mpg123-decoder",
-    "silk-wasm",
-    "ws"
-  ]
+  "homepage": "https://github.com/vanvan4622/qqbot"
 }

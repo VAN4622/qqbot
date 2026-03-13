@@ -1,6 +1,11 @@
 import { getQQBotRuntime } from "./runtime.js";
 
 type JsonRecord = Record<string, unknown>;
+type OpenClawLikeConfig = {
+  agents?: {
+    list?: Array<{ id?: string; default?: boolean }>;
+  };
+};
 
 export type QQBotReminderTarget = {
   to: string;
@@ -26,6 +31,9 @@ export type QQBotReminderSummary = {
   enabled: boolean;
   to?: string;
   accountId?: string;
+  agentId?: string;
+  sessionKey?: string;
+  sessionTarget?: string;
   scheduleKind?: string;
   nextRunAtMs?: number;
   lastRunAtMs?: number;
@@ -34,6 +42,52 @@ export type QQBotReminderSummary = {
 
 function asRecord(value: unknown): JsonRecord | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function readNestedRecord(value: JsonRecord | null, key: string): JsonRecord | null {
+  return asRecord(value?.[key]);
+}
+
+function readStringCandidate(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function toTimestampMs(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function readTimestampCandidate(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = toTimestampMs(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function extractJsonArray(record: JsonRecord, keys: string[]): unknown[] {
+  for (const key of keys) {
+    const value = record[key];
+    if (Array.isArray(value)) {
+      return value;
+    }
+  }
+  return [];
 }
 
 function parseCliJson(stdout: string, stderr: string, commandLabel: string): JsonRecord {
@@ -83,12 +137,89 @@ function buildDefaultReminderName(message: string): string {
   return `QQBot提醒 ${head || "未命名"}`;
 }
 
-function buildReminderTargetArgs(target: QQBotReminderTarget): string[] {
-  const args = ["--channel", "qqbot", "--to", target.to];
-  if (target.accountId) {
-    args.push("--account", target.accountId);
+function normalizeAgentId(value?: string): string {
+  return value?.trim().toLowerCase() || "main";
+}
+
+function resolveDefaultAgentId(cfg: Record<string, unknown>): string {
+  const config = cfg as OpenClawLikeConfig;
+  const agents = Array.isArray(config.agents?.list) ? config.agents!.list : [];
+  if (agents.length === 0) {
+    return "main";
   }
-  return args;
+  const defaultEntry = agents.find((entry) => entry?.default && typeof entry.id === "string" && entry.id.trim());
+  const firstEntry = agents.find((entry) => typeof entry?.id === "string" && entry.id.trim());
+  return normalizeAgentId(defaultEntry?.id || firstEntry?.id || "main");
+}
+
+type QQBotReminderRunSummary = {
+  lastRunAtMs?: number;
+  lastRunStatus?: string;
+};
+
+function readReminderRunSummary(run: unknown): QQBotReminderRunSummary | null {
+  const record = asRecord(run);
+  if (!record) {
+    return null;
+  }
+
+  const state = readNestedRecord(record, "state");
+  const result = readNestedRecord(record, "result");
+
+  const lastRunAtMs = readTimestampCandidate(
+    record.completedAtMs,
+    record.finishedAtMs,
+    record.endedAtMs,
+    record.timestampMs,
+    record.startedAtMs,
+    record.createdAtMs,
+    record.completedAt,
+    record.finishedAt,
+    record.endedAt,
+    record.timestamp,
+    record.startedAt,
+    record.createdAt,
+    state?.completedAtMs,
+    state?.finishedAtMs,
+    state?.endedAtMs,
+    state?.startedAtMs,
+    state?.completedAt,
+    state?.finishedAt,
+    state?.endedAt,
+    state?.startedAt,
+  );
+
+  const lastRunStatus = readStringCandidate(
+    record.status,
+    record.outcome,
+    record.state,
+    state?.status,
+    state?.outcome,
+    result?.status,
+    result?.outcome,
+  );
+
+  if (lastRunAtMs === undefined && !lastRunStatus) {
+    return null;
+  }
+
+  return {
+    ...(lastRunAtMs !== undefined ? { lastRunAtMs } : {}),
+    ...(lastRunStatus ? { lastRunStatus } : {}),
+  };
+}
+
+async function readLatestReminderRun(jobId: string): Promise<QQBotReminderRunSummary | null> {
+  try {
+    const result = await runCronCli(["runs", "--id", jobId, "--limit", "1"]);
+    const runs = extractJsonArray(result, ["runs", "items", "entries"]);
+    if (runs.length === 0) {
+      return null;
+    }
+    return readReminderRunSummary(runs[0]);
+  } catch {
+    return null;
+  }
 }
 
 function readReminderSummary(job: unknown): QQBotReminderSummary | null {
@@ -101,19 +232,38 @@ function readReminderSummary(job: unknown): QQBotReminderSummary | null {
   const delivery = asRecord(record.delivery);
   const state = asRecord(record.state);
   const schedule = asRecord(record.schedule);
+  const session = asRecord(record.session);
+  const payloadSession = readNestedRecord(payload, "session");
 
-  const to = typeof delivery?.to === "string"
-    ? delivery.to
-    : typeof payload?.to === "string"
-      ? payload.to
-      : undefined;
-  const channel = typeof delivery?.channel === "string"
-    ? delivery.channel
-    : typeof payload?.channel === "string"
-      ? payload.channel
-      : undefined;
+  const to = readStringCandidate(
+    delivery?.to,
+    payload?.to,
+    record.to,
+  );
+  const channel = readStringCandidate(
+    delivery?.channel,
+    payload?.channel,
+    record.channel,
+  );
+  const sessionKey = readStringCandidate(
+    record.sessionKey,
+    session?.key,
+    payload?.sessionKey,
+    payloadSession?.key,
+  );
+  const sessionTarget = readStringCandidate(
+    record.sessionTarget,
+    session?.target,
+    payload?.sessionTarget,
+  );
+  const agentId = readStringCandidate(
+    record.agentId,
+    payload?.agentId,
+  );
+  const looksLikeQQBotSession = typeof sessionKey === "string" && sessionKey.includes(":qqbot:");
+  const isQQBotDelivery = channel === "qqbot" || (typeof to === "string" && /^qqbot:/i.test(to));
 
-  if (channel !== "qqbot" || !to) {
+  if (!looksLikeQQBotSession && !isQQBotDelivery) {
     return null;
   }
 
@@ -121,54 +271,98 @@ function readReminderSummary(job: unknown): QQBotReminderSummary | null {
     id: typeof record.id === "string" ? record.id : "",
     name: typeof record.name === "string" ? record.name : "QQBot提醒",
     enabled: record.enabled !== false,
-    to,
-    accountId: typeof delivery?.accountId === "string" ? delivery.accountId : undefined,
-    scheduleKind: typeof schedule?.kind === "string" ? schedule.kind : undefined,
-    nextRunAtMs: typeof state?.nextRunAtMs === "number" ? state.nextRunAtMs : undefined,
-    lastRunAtMs: typeof state?.lastRunAtMs === "number"
-      ? state.lastRunAtMs
+    ...(to ? { to } : {}),
+    ...(typeof delivery?.accountId === "string" ? { accountId: delivery.accountId } : {}),
+    ...(agentId ? { agentId } : {}),
+    ...(sessionKey ? { sessionKey } : {}),
+    ...(sessionTarget ? { sessionTarget } : {}),
+    ...(typeof schedule?.kind === "string" ? { scheduleKind: schedule.kind } : {}),
+    ...(typeof state?.nextRunAtMs === "number" ? { nextRunAtMs: state.nextRunAtMs } : {}),
+    ...(typeof state?.lastRunAtMs === "number"
+      ? { lastRunAtMs: state.lastRunAtMs }
       : typeof record.lastRunAtMs === "number"
-        ? record.lastRunAtMs
-        : undefined,
-    lastRunStatus: typeof state?.lastRunStatus === "string"
-      ? state.lastRunStatus
+        ? { lastRunAtMs: record.lastRunAtMs }
+        : {}),
+    ...(typeof state?.lastRunStatus === "string"
+      ? { lastRunStatus: state.lastRunStatus }
       : typeof state?.lastStatus === "string"
-        ? state.lastStatus
+        ? { lastRunStatus: state.lastStatus }
         : typeof record.lastRunStatus === "string"
-          ? record.lastRunStatus
+          ? { lastRunStatus: record.lastRunStatus }
           : typeof record.lastStatus === "string"
-            ? record.lastStatus
-            : undefined,
+            ? { lastRunStatus: record.lastStatus }
+            : {}),
   };
 }
 
 function matchesReminderTarget(job: QQBotReminderSummary, target: QQBotReminderTarget): boolean {
-  if (job.to?.toLowerCase() !== target.to.toLowerCase()) {
+  if (target.sessionKey) {
+    if (job.sessionKey !== target.sessionKey) {
+      return false;
+    }
+    if (target.agentId && job.agentId && job.agentId !== target.agentId) {
+      return false;
+    }
+    if (target.accountId && job.accountId && job.accountId !== target.accountId) {
+      return false;
+    }
+    return true;
+  }
+
+  if (!job.to || job.to.toLowerCase() !== target.to.toLowerCase()) {
     return false;
   }
-  if (target.accountId) {
-    return job.accountId === target.accountId;
+  if (target.accountId && job.accountId && job.accountId !== target.accountId) {
+    return false;
   }
   return true;
 }
 
-export async function addQQBotReminder(_cfg: Record<string, unknown>, input: QQBotReminderCreateInput): Promise<QQBotReminderSummary> {
+export async function addQQBotReminder(cfg: Record<string, unknown>, input: QQBotReminderCreateInput): Promise<QQBotReminderSummary> {
+  if (!input.sessionKey) {
+    throw new Error("QQBot reminders run in the originating chat context. Provide reminderSessionKey when session metadata is unavailable.");
+  }
+
+  const resolvedAgentId = normalizeAgentId(input.agentId);
+  const defaultAgentId = resolveDefaultAgentId(cfg);
+  const useMainSession = resolvedAgentId === defaultAgentId;
+
   const args = [
     "add",
     "--name",
     input.name?.trim() || buildDefaultReminderName(input.message),
-    "--message",
-    input.message,
-    "--session",
-    "isolated",
-    "--wake",
-    "now",
-    "--announce",
-    ...buildReminderTargetArgs(input),
   ];
 
-  if (input.agentId) {
-    args.push("--agent", input.agentId);
+  if (useMainSession) {
+    args.push(
+      "--system-event",
+      input.message,
+      "--session",
+      "main",
+      "--wake",
+      "now",
+    );
+  } else {
+    args.push(
+      "--message",
+      input.message,
+      "--session",
+      "isolated",
+      "--wake",
+      "now",
+      "--announce",
+      "--channel",
+      "qqbot",
+      "--to",
+      input.to,
+    );
+    if (input.accountId) {
+      args.push("--account", input.accountId);
+    }
+  }
+
+  if (resolvedAgentId) {
+    args.push("--agent", resolvedAgentId);
   }
   if (input.sessionKey) {
     args.push("--session-key", input.sessionKey);
@@ -191,7 +385,17 @@ export async function addQQBotReminder(_cfg: Record<string, unknown>, input: QQB
   const result = await runCronCli(args);
   const summary = readReminderSummary(result);
   if (!summary) {
-    throw new Error("openclaw cron add returned a non-QQBot job");
+    return {
+      id: typeof result.id === "string" ? result.id : "",
+      name: typeof result.name === "string" ? result.name : (input.name?.trim() || buildDefaultReminderName(input.message)),
+      enabled: result.enabled !== false,
+      to: input.to,
+      accountId: input.accountId,
+      agentId: resolvedAgentId,
+      sessionKey: input.sessionKey,
+      sessionTarget: useMainSession ? "main" : "isolated",
+      nextRunAtMs: typeof result.nextRunAtMs === "number" ? result.nextRunAtMs : undefined,
+    };
   }
   return summary;
 }
@@ -203,10 +407,22 @@ export async function listQQBotReminders(
 ): Promise<QQBotReminderSummary[]> {
   const result = await runCronCli(["list", ...(includeDisabled ? ["--all"] : [])]);
   const jobs = Array.isArray(result.jobs) ? result.jobs : [];
-  return jobs
+  const reminders = jobs
     .map((job) => readReminderSummary(job))
     .filter((job): job is QQBotReminderSummary => Boolean(job))
     .filter((job) => matchesReminderTarget(job, target));
+
+  return Promise.all(reminders.map(async (job) => {
+    const latestRun = job.id ? await readLatestReminderRun(job.id) : null;
+    if (!latestRun) {
+      return job;
+    }
+    return {
+      ...job,
+      ...(latestRun.lastRunAtMs !== undefined ? { lastRunAtMs: latestRun.lastRunAtMs } : {}),
+      ...(latestRun.lastRunStatus ? { lastRunStatus: latestRun.lastRunStatus } : {}),
+    };
+  }));
 }
 
 export async function removeQQBotReminder(

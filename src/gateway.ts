@@ -2,8 +2,8 @@ import WebSocket from "ws";
 import path from "node:path";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
-import type { QQBotIMStyleReplyConfig, ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
-import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify } from "./api.js";
+import type { QQBotIMStyleReplyConfig, ResolvedQQBotAccount, WSPayload, C2CMessageEvent } from "./types.js";
+import { getAccessToken, getGatewayUrl, sendC2CMessage, clearTokenCache, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify } from "./api.js";
 import { loadSession, saveSession, clearSession, type SessionState } from "./session-store.js";
 import { recordKnownUser, flushKnownUsers } from "./known-users.js";
 import { getQQBotRuntime } from "./runtime.js";
@@ -117,36 +117,15 @@ async function transcribeAudio(audioPath: string, cfg: Record<string, unknown>, 
   return result.text?.trim() || null;
 }
 
-// QQ Bot intents - 按权限级别分组
 const INTENTS = {
-  // 基础权限（默认有）
-  GUILDS: 1 << 0,                    // 频道相关
-  GUILD_MEMBERS: 1 << 1,             // 频道成员
-  PUBLIC_GUILD_MESSAGES: 1 << 30,    // 频道公开消息（公域）
-  // 需要申请的权限
-  DIRECT_MESSAGE: 1 << 12,           // 频道私信
-  GROUP_AND_C2C: 1 << 25,            // 群聊和 C2C 私聊（需申请）
+  C2C_MESSAGES: 1 << 25,
 };
 
-// 权限级别：从高到低依次尝试
 const INTENT_LEVELS = [
-  // Level 0: 完整权限（群聊 + 私信 + 频道）
   {
-    name: "full",
-    intents: INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.DIRECT_MESSAGE | INTENTS.GROUP_AND_C2C,
-    description: "群聊+私信+频道",
-  },
-  // Level 1: 群聊 + 频道（无私信）
-  {
-    name: "group+channel",
-    intents: INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.GROUP_AND_C2C,
-    description: "群聊+频道",
-  },
-  // Level 2: 仅频道（基础权限）
-  {
-    name: "channel-only",
-    intents: INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.GUILD_MEMBERS,
-    description: "仅频道消息",
+    name: "c2c",
+    intents: INTENTS.C2C_MESSAGES,
+    description: "仅 C2C 私聊",
   },
 ];
 
@@ -401,6 +380,36 @@ function summarizeLocalAttachmentsForHistory(mediaTypes: string[]): string | und
   }
 
   return `[附件] 用户发送了 ${parts.join("、")}`;
+}
+
+function buildVisualMediaHint(mediaTypes: string[]): string | undefined {
+  let imageCount = 0;
+  let videoCount = 0;
+
+  for (const mediaType of mediaTypes) {
+    if (mediaType.startsWith("image/")) {
+      imageCount += 1;
+    } else if (mediaType.startsWith("video/")) {
+      videoCount += 1;
+    }
+  }
+
+  const parts: string[] = [];
+  if (imageCount > 0) {
+    parts.push(`${imageCount} 张图片`);
+  }
+  if (videoCount > 0) {
+    parts.push(`${videoCount} 个视频`);
+  }
+
+  if (parts.length === 0) {
+    return undefined;
+  }
+
+  return [
+    `[视觉附件] 用户发送了 ${parts.join("、")}。`,
+    "如果你具备多模态能力，请直接尝试理解图片或视频内容；不要机械地回复看不到、无法查看，或让用户重复描述附件内容。",
+  ].join("\n");
 }
 
 /**
@@ -666,15 +675,12 @@ export interface GatewayContext {
  * 消息队列项类型（用于异步处理消息，防止阻塞心跳）
  */
 interface QueuedMessage {
-  type: "c2c" | "guild" | "dm" | "group";
+  type: "c2c";
   senderId: string;
   senderName?: string;
   content: string;
   messageId: string;
   timestamp: string;
-  channelId?: string;
-  guildId?: string;
-  groupOpenid?: string;
   attachments?: Array<{ content_type: string; url: string; filename?: string; voice_wav_url?: string }>;
 }
 
@@ -792,8 +798,6 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
   // 获取消息的路由 key（决定并发隔离粒度）
   const getMessagePeerId = (msg: QueuedMessage): string => {
-    if (msg.type === "guild") return `guild:${msg.channelId ?? "unknown"}`;
-    if (msg.type === "group") return `group:${msg.groupOpenid ?? "unknown"}`;
     return `dm:${msg.senderId}`;
   };
 
@@ -955,15 +959,12 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
       // 处理收到的消息
       const handleMessage = async (event: {
-        type: "c2c" | "guild" | "dm" | "group";
+        type: "c2c";
         senderId: string;
         senderName?: string;
         content: string;
         messageId: string;
         timestamp: string;
-        channelId?: string;
-        guildId?: string;
-        groupOpenid?: string;
         attachments?: Array<{ content_type: string; url: string; filename?: string; voice_wav_url?: string }>;
       }) => {
 
@@ -1000,21 +1001,13 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           log?.error(`[qqbot:${account.accountId}] sendC2CInputNotify error: ${err}`);
         }
 
-        const isGroupChat = event.type === "guild" || event.type === "group";
-        // peerId 只放纯 ID，类型信息由 peer.kind 表达
-        // 群聊：用 groupOpenid（框架根据 kind:"group" 区分）
-        // 私聊：用 senderId（框架根据 dmScope 决定隔离粒度）
-        const peerId = event.type === "guild" ? (event.channelId ?? "unknown")
-                     : event.type === "group" ? (event.groupOpenid ?? "unknown")
-                     : event.senderId;
-
         const route = pluginRuntime.channel.routing.resolveAgentRoute({
           cfg,
           channel: "qqbot",
           accountId: account.accountId,
           peer: {
-            kind: isGroupChat ? "group" : "direct",
-            id: peerId,
+            kind: "direct",
+            id: event.senderId,
           },
         });
         const inboundHistory = await readPendingInboundHistory(route.sessionKey);
@@ -1170,7 +1163,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           from: event.senderName ?? event.senderId,
           timestamp: new Date(event.timestamp).getTime(),
           body: userContent,
-          chatType: isGroupChat ? "group" : "direct",
+          chatType: "direct",
           sender: {
             id: event.senderId,
             name: event.senderName,
@@ -1187,6 +1180,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         if (transcriptText) {
           agentBodyParts.push(`[语音转写]\n${transcriptText}`);
           agentBodyParts.push("[回复偏好]\n当前消息是语音消息；在自然且合适时，优先使用语音回复。");
+        }
+        const visualMediaHint = buildVisualMediaHint(localMediaTypes);
+        if (visualMediaHint) {
+          agentBodyParts.push(visualMediaHint);
         }
         if (agentBodyParts.length === 0 && fallbackAttachmentNotes.length > 0) {
           agentBodyParts.push(["[附件说明]", ...fallbackAttachmentNotes].join("\n"));
@@ -1208,19 +1205,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
         log?.info(`[qqbot:${account.accountId}] agentBody length: ${agentBody.length}`);
 
-        const fromAddress = event.type === "guild" ? `qqbot:channel:${event.channelId}`
-                         : event.type === "group" ? `qqbot:group:${event.groupOpenid}`
-                         : `qqbot:c2c:${event.senderId}`;
+        const fromAddress = `qqbot:c2c:${event.senderId}`;
         const toAddress = fromAddress;
-        const nativeChannelId = event.channelId ?? event.groupOpenid ?? event.senderId;
-        const conversationLabel = event.type === "guild"
-          ? `QQ channel ${event.channelId}`
-          : event.type === "group"
-            ? `QQ group ${event.groupOpenid}`
-            : `QQ DM ${event.senderId}`;
-        const groupSubject = event.type === "group" ? event.groupOpenid : undefined;
-        const groupChannel = event.type === "guild" ? event.channelId : undefined;
-        const groupSpace = event.type === "guild" ? event.guildId : undefined;
+        const nativeChannelId = event.senderId;
+        const conversationLabel = `QQ DM ${event.senderId}`;
 
         // 计算命令授权状态
         // allowFrom: ["*"] 表示允许所有人，否则检查 senderId 是否在 allowFrom 列表中
@@ -1241,11 +1229,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           To: toAddress,
           SessionKey: route.sessionKey,
           AccountId: route.accountId,
-          ChatType: isGroupChat ? "group" : "direct",
+          ChatType: "direct",
           ConversationLabel: conversationLabel,
-          GroupSubject: groupSubject,
-          GroupChannel: groupChannel,
-          GroupSpace: groupSpace,
           SenderId: event.senderId,
           SenderName: event.senderName,
           Provider: "qqbot",
@@ -1255,9 +1240,6 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           NativeChannelId: nativeChannelId,
           OriginatingChannel: "qqbot",
           OriginatingTo: toAddress,
-          QQChannelId: event.channelId,
-          QQGuildId: event.guildId,
-          QQGroupOpenid: event.groupOpenid,
           ...(transcriptText ? { Transcript: transcriptText } : {}),
           ...(untrustedContext ? { UntrustedContext: untrustedContext } : {}),
           CommandAuthorized: commandAuthorized,
@@ -1306,13 +1288,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         const sendErrorMessage = async (errorText: string) => {
           try {
             await sendWithTokenRetry(async (token) => {
-              if (event.type === "c2c") {
-                await sendC2CMessage(token, event.senderId, errorText, event.messageId);
-              } else if (event.type === "group" && event.groupOpenid) {
-                await sendGroupMessage(token, event.groupOpenid, errorText, event.messageId);
-              } else if (event.channelId) {
-                await sendChannelMessage(token, event.channelId, errorText, event.messageId);
-              }
+              await sendC2CMessage(token, event.senderId, errorText, event.messageId);
             });
           } catch (sendErr) {
             log?.error(`[qqbot:${account.accountId}] Failed to send error message: ${sendErr}`);
@@ -1327,13 +1303,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             return;
           }
           await sendWithTokenRetry(async (token) => {
-            if (event.type === "c2c") {
-              await sendC2CMessage(token, event.senderId, trimmed, event.messageId);
-            } else if (event.type === "group" && event.groupOpenid) {
-              await sendGroupMessage(token, event.groupOpenid, trimmed, event.messageId);
-            } else if (event.channelId) {
-              await sendChannelMessage(token, event.channelId, trimmed, event.messageId);
-            }
+            await sendC2CMessage(token, event.senderId, trimmed, event.messageId);
           });
           recordMessageReply(event.messageId);
         };
@@ -1386,12 +1356,6 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
               }
             }, responseTimeout);
           });
-
-          // ============ 消息发送目标 ============
-          // 确定发送目标
-          const targetTo = event.type === "c2c" ? event.senderId
-                        : event.type === "group" ? `group:${event.groupOpenid}`
-                        : `channel:${event.channelId}`;
 
           const dispatchPromise = pluginRuntime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
             ctx: ctxPayload,
@@ -1603,63 +1567,6 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   content: event.content,
                   messageId: event.id,
                   timestamp: event.timestamp,
-                  attachments: event.attachments,
-                });
-              } else if (t === "AT_MESSAGE_CREATE") {
-                const event = d as GuildMessageEvent;
-                // P1-3: 记录已知用户（频道用户）
-                recordKnownUser({
-                  openid: event.author.id,
-                  type: "c2c", // 频道用户按 c2c 类型存储
-                  nickname: event.author.username,
-                  accountId: account.accountId,
-                });
-                enqueueMessage({
-                  type: "guild",
-                  senderId: event.author.id,
-                  senderName: event.author.username,
-                  content: event.content,
-                  messageId: event.id,
-                  timestamp: event.timestamp,
-                  channelId: event.channel_id,
-                  guildId: event.guild_id,
-                  attachments: event.attachments,
-                });
-              } else if (t === "DIRECT_MESSAGE_CREATE") {
-                const event = d as GuildMessageEvent;
-                // P1-3: 记录已知用户（频道私信用户）
-                recordKnownUser({
-                  openid: event.author.id,
-                  type: "c2c",
-                  nickname: event.author.username,
-                  accountId: account.accountId,
-                });
-                enqueueMessage({
-                  type: "dm",
-                  senderId: event.author.id,
-                  senderName: event.author.username,
-                  content: event.content,
-                  messageId: event.id,
-                  timestamp: event.timestamp,
-                  guildId: event.guild_id,
-                  attachments: event.attachments,
-                });
-              } else if (t === "GROUP_AT_MESSAGE_CREATE") {
-                const event = d as GroupMessageEvent;
-                // P1-3: 记录已知用户（群组用户）
-                recordKnownUser({
-                  openid: event.author.member_openid,
-                  type: "group",
-                  groupOpenid: event.group_openid,
-                  accountId: account.accountId,
-                });
-                enqueueMessage({
-                  type: "group",
-                  senderId: event.author.member_openid,
-                  content: event.content,
-                  messageId: event.id,
-                  timestamp: event.timestamp,
-                  groupOpenid: event.group_openid,
                   attachments: event.attachments,
                 });
               }
